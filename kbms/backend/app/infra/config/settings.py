@@ -9,6 +9,8 @@ class Settings(PydanticBaseSettings):
     VERSION: str = "0.1.0"
     DEBUG: bool = False
     API_V1_STR: str = "/api/v1"
+    # 统一新路由前缀（SPEC §3.1/§5.2）；旧 /api/v1 保留为兼容变量。
+    API_STR: str = "/api"
     BACKEND_CORS_ORIGINS: list[str] = ["*"] # ["http://localhost:8000"]
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
