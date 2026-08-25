@@ -58,7 +58,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Only the runtime package directories are copied; dev-only files (pyproject.toml,
 # uv.lock, Dockerfile, docker-compose.yml, .env, test/, tree.ps1) stay out of the
 # image because they are not in this COPY list (and .dockerignore excludes caches).
-COPY api core domain factories infra main.py schema scripts services static utils workflows /app/app/
+COPY api app core domain factories infra main.py schema scripts services static utils workflows /app/app/
 
 # Runtime directories used by the import/query services.
 RUN mkdir -p /app/temp-files /app/logs

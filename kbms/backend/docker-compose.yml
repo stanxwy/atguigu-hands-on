@@ -28,6 +28,30 @@ services:
     networks:
       - kb-net
 
+  # PostgreSQL 用于承载 KBMS 关系数据层（SPEC §2 的 10 张表）
+  postgres:
+    image: postgres:16
+    container_name: kb-postgres
+    restart: unless-stopped
+    environment:
+      # 关系库账号/库名，与 .env.prod 的 DATABASE_URL 保持一致
+      POSTGRES_USER: kbms
+      POSTGRES_PASSWORD: kbms
+      POSTGRES_DB: kbms
+    ports:
+      - "5432:5432"
+    volumes:
+      # 持久化数据库数据
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/postgres:/var/lib/postgresql/data
+    healthcheck:
+      # 就绪探针：确认 PostgreSQL 已可接受连接
+      test: ["CMD-SHELL", "pg_isready -U kbms -d kbms"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kb-net
+
   # MongoDB 用于保存业务结构化数据
   mongodb:
     image: mongo:7.0
@@ -89,13 +113,15 @@ services:
       - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/kb-import/temp-files:/app/temp-files
       - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/kb-import/logs:/app/logs
     depends_on:
-      # 业务依赖（均在本 compose 内）：对象存储、图数据库、文档库。
+      # 业务依赖（均在本 compose 内）：对象存储、图数据库、文档库、关系库。
       minio:
         condition: service_started
       neo4j:
         condition: service_started
       mongodb:
         condition: service_started
+      postgres:
+        condition: service_healthy
       # 向量库 Milvus 来自 infra compose；经根 docker-compose.yml 的 include 合并为
       # 同一项目后，可按服务名 milvus-standalone 访问，且需等其健康后再启动本服务。
       milvus-standalone:
@@ -132,6 +158,8 @@ services:
         condition: service_started
       mongodb:
         condition: service_started
+      postgres:
+        condition: service_healthy
       milvus-standalone:
         condition: service_healthy
     healthcheck:

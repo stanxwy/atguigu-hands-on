@@ -70,9 +70,30 @@ class Settings(PydanticBaseSettings):
     mongo_url: str = Field(..., env="MONGO_URL")
     mongo_db_name: str = Field(..., env="MONGO_DB_NAME")
 
+    # ===== PostgreSQL / Relational DB (KBMS) =====
+    # SQLite is the dev/test default (no extra dependency); switch to
+    # postgresql+psycopg://... in production via the DATABASE_URL env var.
+    DATABASE_URL: str = Field("sqlite:///./kbms.db", env="DATABASE_URL")
+
+    # ===== Auth / JWT =====
+    JWT_SECRET: str = Field("kbms-dev-secret-change-me", env="JWT_SECRET")
+    JWT_EXPIRE_MINUTES: int = Field(1440, env="JWT_EXPIRE_MINUTES")
+
+    # ===== Data Permission =====
+    DATA_PERM_DEPT_RECURSIVE: bool = Field(True, env="DATA_PERM_DEPT_RECURSIVE")
+
+    # ===== FAQ / Gap thresholds =====
+    FAQ_SIMILARITY_THRESHOLD: float = Field(0.85, env="FAQ_SIMILARITY_THRESHOLD")
+    FAQ_MIN_FREQUENCY: int = Field(3, env="FAQ_MIN_FREQUENCY")
+    GAP_SIMILARITY_THRESHOLD: float = Field(0.5, env="GAP_SIMILARITY_THRESHOLD")
+
     class Config:
         env_file = ".env"
         env_prefix = "" # env_prefix = "KB_"
+        # 忽略 .env 中未在 Settings 声明的键（如 DATA_BASED_ROOT_DIR、EMBEDDING_DIM、
+        # MODELSCOPE_CACHE、NVIDIA_API_KEY 等被旧代码通过 os.getenv 读取的变量），
+        # 否则 pydantic v2 默认 extra="forbid" 会在实例化时抛 ValidationError。
+        extra = "ignore"
 
 
 @lru_cache(maxsize=1)
