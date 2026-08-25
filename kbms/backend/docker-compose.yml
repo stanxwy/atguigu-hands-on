@@ -1,0 +1,150 @@
+services:
+  # MinIO 用于存储上传的原始文件、图片等对象数据
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: kb-minio
+    restart: unless-stopped
+    environment:
+      # 管理员账号密码，生产环境请务必修改
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      # 兼容旧版本变量名，部分组件会读取这组值
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    # 9000 是对象存储接口，9001 是 MinIO 控制台
+    command: minio server /minio_data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      # 持久化对象文件
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/minio:/minio_data
+    healthcheck:
+      # 检查 MinIO 服务是否存活
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - kb-net
+
+  # MongoDB 用于保存业务结构化数据
+  mongodb:
+    image: mongo:7.0
+    container_name: kb-mongodb
+    restart: unless-stopped
+    ports:
+      - 27017:27017
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/mongo:/data/db
+    networks:
+    - kb-net
+
+  # Neo4j 用于保存图谱关系数据
+  neo4j:
+    image: neo4j:5.15.0-community
+    container_name: kb-neo4j
+    restart: unless-stopped
+    environment:
+      # 初始登录账号密码，格式为 用户名/密码
+      NEO4J_AUTH: neo4j/123123123
+    ports:
+      # 7474 是 Web 控制台端口，7687 是 Bolt 协议端口
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      # 分别持久化数据、日志、配置和插件目录
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/neo4j/data:/data
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/neo4j/logs:/logs
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/neo4j/conf:/conf
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/neo4j/plugins:/plugins
+    networks:
+      - kb-net
+
+  # 导入服务：负责文件上传、解析、切分、入库等流程
+  kb-import:
+    build:
+      # 自包含布局：构建上下文为 app/ 服务根目录，Dockerfile 与 pyproject.toml、
+      # uv.lock 等同处 app/，直接以当前目录为上下文即可。
+      context: .
+      dockerfile: Dockerfile
+    # 与查询服务共用同一套镜像，仅启动命令不同
+    image: kb-app:latest
+    container_name: kb-import
+    restart: unless-stopped
+    env_file:
+      # 统一加载生产环境变量
+      - .env.prod
+    # 启动导入接口，监听 8000 端口。
+    # 入口修正为 app.main:app（原 knowledge.api.import_router:create_app 指向的
+    # import_router / create_app 在当前代码中不存在）。
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    ports:
+      - "8000:8000"
+    volumes:
+      # 挂载临时文件和日志目录，便于宿主机查看与持久化
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/kb-import/temp-files:/app/temp-files
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/kb-import/logs:/app/logs
+    depends_on:
+      # 业务依赖（均在本 compose 内）：对象存储、图数据库、文档库。
+      minio:
+        condition: service_started
+      neo4j:
+        condition: service_started
+      mongodb:
+        condition: service_started
+      # 向量库 Milvus 来自 infra compose；经根 docker-compose.yml 的 include 合并为
+      # 同一项目后，可按服务名 milvus-standalone 访问，且需等其健康后再启动本服务。
+      milvus-standalone:
+        condition: service_healthy
+    networks:
+      # kb-net 连通业务依赖；milvus 网络用于按服务名访问 Milvus（milvus-standalone）。
+      - kb-net
+      - milvus
+
+  # 查询服务：负责检索、召回、重排和问答接口
+  kb-query:
+    build:
+      # 自包含布局：构建上下文为 app/ 服务根目录，与 kb-import 保持一致
+      context: .
+      dockerfile: Dockerfile
+    image: kb-app:latest
+    container_name: kb-query
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    # 启动查询接口，监听 8001 端口。
+    # 入口修正为 app.main:app（原 knowledge.api.query_router:create_app 指向的
+    # create_app 工厂在当前代码中不存在，且 query_router 位于 app.api.v1 下）。
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]
+    ports:
+      - "8001:8001"
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/kb-query/temp-files:/app/temp-files
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/kb-query/logs:/app/logs
+    depends_on:
+      minio:
+        condition: service_started
+      neo4j:
+        condition: service_started
+      mongodb:
+        condition: service_started
+      milvus-standalone:
+        condition: service_healthy
+    healthcheck:
+      # 通过健康检查接口确认查询服务已经可用
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - kb-net
+      - milvus
+
+networks:
+  # 自定义桥接网络，保证各容器可以通过服务名互相访问
+  kb-net:
+    driver: bridge

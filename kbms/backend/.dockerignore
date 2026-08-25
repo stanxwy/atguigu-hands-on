@@ -1,0 +1,20 @@
+# Build context is the app/ service root.
+# Keep build-context noise out of the image. NOTE: do NOT ignore pyproject.toml,
+# uv.lock, or Dockerfile here — they are copied explicitly by the Dockerfile.
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Local virtual environment (the image builds its own /app/.venv via uv)
+.venv/
+
+# Secrets / local env (compose reads .env.prod on the host, not from the image)
+.env
+.env.*
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/

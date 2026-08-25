@@ -1,0 +1,96 @@
+services:
+  milvus-etcd:
+    container_name: milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.18
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/etcd:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    restart: unless-stopped
+    networks:
+      - milvus
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # 仅供 Milvus 存储 chunk/segment 的对象存储，与 app 项目里业务用的 minio
+  # （容器 kb-minio）是两个互相独立的实例；为避免两 compose 合并时的服务名冲突，
+  # 这里显式命名为 milvus-minio。
+  milvus-minio:
+    container_name: milvus-minio
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9003:9001"
+      - "9002:9000"
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    restart: unless-stopped
+    networks:
+      - milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus-standalone:
+    container_name: milvus-standalone
+    image: milvusdb/milvus:v2.5.5
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+    - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
+    restart: unless-stopped
+    networks:
+      - milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      - "milvus-etcd"
+      - "milvus-minio"
+      
+  milvus-attu:
+    container_name: milvus-attu
+    image: zilliz/attu:v2.5.10
+    environment:
+      - MILVUS_URL=milvus-standalone:19530
+      - ATTU_LOG_LEVEL=info
+      - SERVER_NAME=auto_gui
+      - SERVER_PORT=7000
+      - HOST=0.0.0.0  # 添加这一行，让 Attu 监听所有接口
+    ports:
+      - "7000:7000"
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/attu:/app/tls
+    depends_on:
+      - milvus-standalone
+    restart: unless-stopped
+    networks:
+      - milvus
+
+networks:
+  # 显式命名，便于 app compose（经根 docker-compose.yml include 合并为同一项目后）
+  # 通过服务名访问 Milvus（milvus-standalone）。
+  milvus:
+    name: milvus

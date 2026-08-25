@@ -1,0 +1,22 @@
+# 根编排文件
+#
+# 通过 include 把 infra/ 与 app/ 两个 compose 合并为「同一个 Compose 项目」，
+# 使它们共享网络（milvus / kb-net）。这样做的好处：
+#   1. app 容器可按服务名 milvus-standalone 直接访问 Milvus，无需 host.docker.internal 兜底；
+#   2. app 的 kb-import / kb-query 通过 depends_on(milvus-standalone, service_healthy)
+#      在 Milvus 就绪后再启动，启动顺序由 Compose 保证。
+#
+# 使用方式（务必在项目根目录执行）：
+#   docker compose up -d --build     # 构建 kb-app 镜像并启动全部服务
+#   docker compose down              # 停止并移除全部服务
+#   docker compose ps               # 查看各服务健康状态
+#
+# 说明：
+#   - 两文件原本都定义了名为 minio 的服务（业务用 kb-minio / Milvus 用 milvus-minio），
+#     已在 infra 中重命名为 milvus-minio 以避免合并冲突。
+#   - 各服务持久化卷路径基于各自 compose 文件所在目录（app/volumes、infra/volumes）。
+#   - 需要 Docker Compose v2.20+（include 指令的最低版本）。
+
+include:
+  - infra/docker-compose.yml
+  - app/docker-compose.yml
