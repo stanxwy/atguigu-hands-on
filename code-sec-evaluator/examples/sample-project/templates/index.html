@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>示例项目 - 搜索</title>
+</head>
+<body>
+    <h1>示例项目搜索页</h1>
+    <p>搜索关键词：<span id="keyword"></span></p>
+
+    <!-- 反射型 XSS 漏洞：Jinja | safe 直接输出用户输入，未转义 -->
+    <div class="result">{{ query | safe }}</div>
+
+    <script>
+        // 反射型 XSS 漏洞：innerHTML 直接渲染 URL 参数，未转义
+        var q = new URLSearchParams(window.location.search).get("q");
+        document.getElementById("keyword").innerHTML = q;
+    </script>
+</body>
+</html>
