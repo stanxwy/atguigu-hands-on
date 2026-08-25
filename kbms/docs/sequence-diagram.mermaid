@@ -1,0 +1,37 @@
+sequenceDiagram
+    autonumber
+    participant C as 前端
+    participant AR as AuthRouter
+    participant AS as AuthService
+    participant IR as IdentityRepository
+    participant AI as AiRouter
+    participant QS as QueryService
+    participant WF as KBQueryWorkflow
+    participant PF as NodePermissionFilter
+    participant PC as DataPermissionChecker
+    participant AO as NodeAnswerOutput
+    participant AL as AccessLogRepository
+    participant SSE as SSE队列
+
+    C->>AR: POST /api/auth/login {username,password}
+    AR->>AS: login()
+    AS->>IR: find_user_by_username()
+    IR-->>AS: user
+    AS->>AS: verify(password_hash)
+    AS-->>AR: {access_token, user_info, permissions}
+    AR-->>C: {code:0, data:{...}}
+
+    C->>AI: POST /api/ai/chat/stream {question, session_id} (Bearer)
+    AI->>QS: init_task + BackgroundTasks(run_graph_task)
+    AI-->>C: StreamingResponse(SSE)
+    QS->>WF: run({question, user_id, session_id})
+    WF->>WF: recall(HyDE+向量+web) → RRF → rerank
+    WF->>PF: reranked_docs(+unit_id)
+    PF->>PC: check(user_id, unit_ids)
+    PC-->>PF: {authorized, unauthorized}
+    PF-->>SSE: permission_warning(unauthorized_count)
+    PF->>AO: authorized_docs + sources
+    AO->>AO: prompt + LLM.stream
+    AO-->>SSE: delta* + sources + final
+    AO->>AL: append_log(question, answer, tokens, authorized/unauthorized, response_time_ms)
+    SSE-->>C: SSE 流（delta/final）
