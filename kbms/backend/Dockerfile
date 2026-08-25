@@ -51,14 +51,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Copy the application source. The `app/` directory's modules (api, core, domain,
-# ...) form the importable `app` package — the code uses `from app.api...` /
-# `from app.workflows...` — so we place them under /app/app and rely on
-# PYTHONPATH=/app to make `import app` resolve to /app/app (a namespace package).
-# Only the runtime package directories are copied; dev-only files (pyproject.toml,
-# uv.lock, Dockerfile, docker-compose.yml, .env, test/, tree.ps1) stay out of the
-# image because they are not in this COPY list (and .dockerignore excludes caches).
-COPY api app core domain factories infra main.py schema scripts services static utils workflows /app/app/
+# Copy the application source. `app/` is the real package root (contains api,
+# domain, factories, infra, schema, services, utils, workflows, static, main.py);
+# `scripts/` holds init_db.py etc. Both land under /app/app so `import app`
+# resolves to /app/app (namespace package, no __init__.py). Dev-only files
+# (pyproject.toml, uv.lock, Dockerfile, docker-compose.yml, .env, tests/, alembic/)
+# stay out of the image because they are not in this COPY list.
+COPY app scripts /app/app/
 
 # Runtime directories used by the import/query services.
 RUN mkdir -p /app/temp-files /app/logs
