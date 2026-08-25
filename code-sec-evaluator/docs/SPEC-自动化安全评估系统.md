@@ -121,7 +121,7 @@
 | Q-4 | 关键字规则集 | P0 内置默认规则集（配置文件 `rules/default_keywords.yaml`），P2 支持用户自定义 |
 | Q-5 | 命令白名单 | 内置只读命令白名单（grep/find/cat/head/tail/sed -n 等）+ 容器网络隔离，验证命令在容器内执行且禁止出网 |
 | Q-6 | 风险/验证枚举 | risk_level：`critical/high/medium/low`，对齐 CVSS v3.1 分级（Critical 9.0–10.0 / High 7.0–8.9 / Medium 4.0–6.9 / Low 0.1–3.9）；verify_status：`unverified/verifying/verified/failed`；CVE 关联（CVE ID + CVSS 分数/向量）列为 P2 增强（仅对依赖扫描类漏洞有意义） |
-| Q-7 | message_type 枚举 | `info/warning/error/critical` |
+| Q-7 | message_type 枚举 | `info/warning/error/critical/success` |
 | Q-8 | token_count 口径 | LLM Token（角色执行消耗的大模型 token 计数），资源监控页计量展示 |
 | Q-9 | 前端技术栈 | 遵循默认 Vite + React + MUI + Tailwind CSS |
 | Q-10 | 报告权威格式 | Markdown 为权威版本，HTML 为渲染派生版本；下载默认输出 Markdown（P2 支持 PDF/HTML） |
@@ -295,7 +295,7 @@ flowchart TB
 | id | BIGINT UNSIGNED | 否 | AUTO_INCREMENT | PK | 消息 ID |
 | project_id | BIGINT UNSIGNED | 否 | - | FK → projects.id，INDEX | 所属项目 |
 | worker_role | VARCHAR(32) | 否 | - | - | 来源角色 |
-| message_type | VARCHAR(16) | 否 | 'info' | - | info/warning/error/critical |
+| message_type | VARCHAR(16) | 否 | 'info' | - | info/warning/error/critical/success |
 | message_text | TEXT | 否 | - | - | 消息内容 |
 | created_at | DATETIME | 否 | CURRENT_TIMESTAMP | - | 创建时间 |
 
@@ -966,7 +966,9 @@ code-sec-evaluator/
 │   │   └── init_admin.py              # 命令行初始化管理员
 │   ├── rules/
 │   │   └── default_keywords.yaml      # 内置关键字规则集（Q-4）
-│   ├── requirements.txt
+│   ├── pyproject.toml                # 依赖与工具链配置（uv 管理）
+│   ├── uv.lock                       # 锁定版本（uv lock/uv sync 生成，权威来源）
+│   ├── .python-version               # Python 版本固定（>=3.11）
 │   └── .env.example
 ├── frontend/                          # 前端（Vite + React + MUI）
 │   ├── src/
@@ -1022,27 +1024,62 @@ code-sec-evaluator/
 
 ### 5.1 依赖包清单
 
-#### 5.1.1 backend/requirements.txt
+#### 5.1.1 backend/pyproject.toml
 
-```text
-fastapi==0.115.6
-uvicorn[standard]==0.32.1
-sqlalchemy==2.0.36
-alembic==1.14.0
-pydantic==2.10.4
-pydantic-settings==2.7.0
-PyJWT==2.10.1
-passlib[bcrypt]==1.7.4
-bcrypt==4.2.1
-python-multipart==0.0.20
-PyMySQL==1.1.1
-docker==7.1.0
-psutil==6.1.1
-Markdown==3.7
-PyYAML==6.0.2
-python-dotenv==1.0.1
-aiofiles==24.1.0
+```toml
+# backend/pyproject.toml —— 依赖与工具链配置（uv 管理）
+# 说明：uv.lock 为锁定版本的权威来源，由 `uv lock` / `uv sync` 生成并提交仓库；
+#       安装命令 `uv sync` 会自动创建 backend/.venv 并安装 dependencies + [dependency-groups].dev。
+
+[project]
+name = "code-sec-evaluator"
+version = "1.0.0"
+description = "自动化安全评估系统后端（FastAPI）"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.32.1",
+    "sqlalchemy==2.0.36",
+    "alembic==1.14.0",
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.0",
+    "PyJWT==2.10.1",
+    "passlib[bcrypt]==1.7.4",
+    "bcrypt==4.2.1",
+    "python-multipart==0.0.20",
+    "PyMySQL==1.1.1",
+    "docker==7.1.0",
+    "psutil==6.1.1",
+    "Markdown==3.7",
+    "PyYAML==6.0.2",
+    "python-dotenv==1.0.1",
+    "aiofiles==24.1.0",
+    "nh3>=0.2.18",              # HTML 净化（安全规范 §2.4）
+]
+
+[dependency-groups]
+dev = [
+    # 测试
+    "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.24,<0.25",
+    "httpx>=0.28,<0.29",
+    "pytest-cov>=5.0,<6.0",
+    "pytest-xdist>=3.6,<4.0",
+    "pytest-mock>=3.14,<4.0",
+    "pytest-timeout>=2.3,<3.0",
+    "Faker>=25.0,<26.0",
+    "aiosqlite>=0.20,<0.21",
+    # 代码质量
+    "black>=24.0,<25.0",
+    "isort>=5.13,<6.0",
+    "ruff>=0.8,<0.9",
+]
+
+[tool.uv]
+# uv 默认行为即可；Python 版本由 backend/.python-version 固定（3.11）
 ```
+
+> **锁定与安装**：`uv.lock` 由 `uv lock` / `uv sync` 自动生成，为锁定版本的权威来源（提交进仓库）；安装依赖统一执行 `uv sync`（自动创建 `backend/.venv`，默认含 dev 组）。运行期依赖放 `[project].dependencies`，测试与代码质量工具放 `[dependency-groups].dev`（对齐《测试规范》§2.2、《编码规范》§2.1）。
 
 #### 5.1.2 frontend/package.json（关键依赖）
 
@@ -1121,7 +1158,7 @@ sequenceDiagram
 
 | 任务 ID | 任务名称 | 主要产出文件 | 依赖 | 优先级 |
 | --- | --- | --- | --- | --- |
-| T01 | 后端基础设施与数据层 | `backend/requirements.txt`、`config.py`、`database.py`、`models/*`、`db/init.sql`、`migrations/`、`core/security.py`、`core/errors.py` | - | P0 |
+| T01 | 后端基础设施与数据层 | `backend/pyproject.toml`、`config.py`、`database.py`、`models/*`、`db/init.sql`、`migrations/`、`core/security.py`、`core/errors.py` | - | P0 |
 | T02 | 认证与系统接口 | `api/system.py`、`services/auth_service.py`、`services/config_service.py`、`schemas/auth.py`、`scripts/init_admin.py` | T01 | P0 |
 | T03 | 项目生命周期与隔离环境 | `services/project_service.py`、`services/isolation_service.py`、`api/projects.py`、`schemas/project.py`、`docker/evaluator.Dockerfile` | T01, T02 | P0 |
 | T04 | 调度器与角色执行 | `services/scheduler.py`、`services/worker_service.py`、`services/vulnerability_service.py`、`services/attack_path_service.py`、`services/report_service.py`、`rules/default_keywords.yaml` | T03 | P0 |

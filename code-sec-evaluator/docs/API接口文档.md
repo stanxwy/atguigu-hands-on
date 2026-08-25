@@ -422,7 +422,7 @@ ws.onmessage = (e) => {
 | risk_level | `critical` / `high` / `medium` / `low` |
 | verify_status | `unverified` / `verifying` / `verified` / `failed` |
 | log_level | `debug` / `info` / `warn` / `error` |
-| message_type | `info` / `warning` / `error` / `critical` |
+| message_type | `info` / `warning` / `error` / `critical` / `success` |
 
 ---
 
