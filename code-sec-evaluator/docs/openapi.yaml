@@ -1,0 +1,1861 @@
+openapi: 3.1.0
+
+info:
+  title: 自动化安全评估系统 API
+  version: 1.0.0
+  description: |
+    自动化安全评估系统（Code Security Evaluator）后端 REST API 契约基线。
+
+    本文件对齐《SPEC-自动化安全评估系统》第 3 章 API 接口设计、第 2 章数据模型、
+    §3.1 通用约定（统一响应封装、错误码、认证方式），覆盖全部 20 个 REST 端点。
+
+    约定：
+    - 所有 JSON 响应体统一封装为 `{ code, message, data }` 结构；
+    - 列表接口 `data` 为 `{ list, total }`，详情接口 `data` 为业务对象；
+    - 除 `/api/system/init`、`/api/system/login` 外均需 `Authorization: Bearer <JWT>` 鉴权；
+    - 系统配置读写接口需管理员（`role == admin`）权限；
+    - WebSocket 接口（`/api/projects/{project_id}/stream`）OpenAPI 3.1 不原生支持，
+      单独在《API接口文档.md》中说明。
+
+servers:
+  - url: http://localhost:8000
+    description: 本地开发环境（FastAPI + Uvicorn 默认端口）
+
+tags:
+  - name: System
+    description: 系统初始化、登录与配置管理
+  - name: Project
+    description: 项目生命周期管理
+  - name: Result
+    description: 评估结果查询（阶段 / 角色 / 漏洞 / 攻击路径 / 报告 / 日志 / 资源）
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/system/init:
+    post:
+      tags: [System]
+      summary: 初始化管理员账户
+      description: |
+        仅当 `users` 表不存在 admin 用户时可调用，用于首次部署初始化管理员。
+        已初始化时返回错误码 `1004`。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitRequest'
+            example:
+              username: admin
+              password: Admin@123456
+      responses:
+        '200':
+          description: 初始化成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  id: 1
+                  username: admin
+                  role: admin
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: 系统已初始化（重复初始化）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                code: 1004
+                message: 系统已初始化
+                data: null
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/system/login:
+    post:
+      tags: [System]
+      summary: 登录
+      description: 校验用户名密码，成功后返回 JWT `access_token`（默认有效期 24 小时，可经系统配置调整）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              username: admin
+              password: Admin@123456
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  access_token: eyJhbGciOiJIUzI1NiIs...
+                  token_type: Bearer
+                  expires_in: 86400
+                  user:
+                    id: 1
+                    username: admin
+                    role: admin
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: 用户名或密码错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                code: 1002
+                message: 用户名或密码错误
+                data: null
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/system/config:
+    get:
+      tags: [System]
+      summary: 查询系统配置（管理员）
+      description: |
+        查询系统配置。需管理员权限（`role == admin`），否则返回错误码 `1003`。
+      x-role-required: admin
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigGetResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  isolation:
+                    default_image: 'sec-evaluator:latest'
+                    mount_readonly: true
+                    network_mode: none
+                  task:
+                    default_timeout_seconds: 1800
+                    max_concurrency: 2
+                  retention:
+                    days: 30
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [System]
+      summary: 更新系统配置（管理员）
+      description: |
+        更新系统配置，键遵循 SPEC §2.5（如 `task.max_concurrency`、`task.default_timeout_seconds`）。
+        需管理员权限（`role == admin`），否则返回错误码 `1003`。
+      x-role-required: admin
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigUpdateRequest'
+            example:
+              config:
+                task.max_concurrency: 4
+                task.default_timeout_seconds: 3600
+      responses:
+        '200':
+          description: 更新成功，返回更新后的配置片段
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigPutResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  task:
+                    default_timeout_seconds: 3600
+                    max_concurrency: 4
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects:
+    post:
+      tags: [Project]
+      summary: 创建项目
+      description: 创建评估项目，初始状态为 `created`。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectCreateRequest'
+            example:
+              project_name: 示例评估项目
+              source_type: local_path
+              source_path: /data/src/demo
+              task_content: 评估注入类漏洞
+      responses:
+        '200':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectCreateResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  id: 1
+                  project_name: 示例评估项目
+                  source_type: local_path
+                  source_path: /data/src/demo
+                  task_content: 评估注入类漏洞
+                  project_status: created
+                  created_at: '2026-08-25T12:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      tags: [Project]
+      summary: 查询项目列表
+      description: 分页查询项目列表，可按状态过滤。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          required: false
+          description: 页码，默认 1
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          required: false
+          description: 每页数量，默认 10
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+        - name: project_status
+          in: query
+          required: false
+          description: 按项目状态过滤
+          schema:
+            $ref: '#/components/schemas/ProjectStatus'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectListResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  total: 1
+                  list:
+                    - id: 1
+                      project_name: 示例评估项目
+                      source_type: local_path
+                      project_status: completed
+                      last_started_at: '2026-08-25T12:01:00Z'
+                      last_finished_at: '2026-08-25T12:20:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{project_id}:
+    parameters:
+      - name: project_id
+        in: path
+        required: true
+        description: 项目 ID
+        schema:
+          type: integer
+          format: int64
+    get:
+      tags: [Project]
+      summary: 查询项目详情
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectDetailResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  id: 1
+                  project_name: 示例评估项目
+                  source_type: local_path
+                  source_path: /data/src/demo
+                  task_content: 评估注入类漏洞
+                  project_status: running
+                  vuln_count: 3
+                  attack_path_count: 1
+                  report_status: none
+                  created_at: '2026-08-25T12:00:00Z'
+                  updated_at: '2026-08-25T12:05:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [Project]
+      summary: 删除项目
+      description: |
+        物理删除项目：销毁隔离容器 + 事务性级联删除业务数据 + 清理文件目录（SPEC §2.4）。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectDeleteResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  deleted_project_id: 1
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{project_id}/start:
+    post:
+      tags: [Project]
+      summary: 启动评估任务
+      description: |
+        启动评估任务（异步受理）。前置校验：项目状态须为 `created/completed/failed/stopped`，
+        否则返回错误码 `2002`。请求体可省略。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          description: 项目 ID
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+            example: {}
+      responses:
+        '200':
+          description: 启动受理成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectStatusResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  project_id: 1
+                  project_status: running
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 状态冲突（非 created/completed/failed/stopped 状态启动）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                code: 2002
+                message: 当前状态不允许启动
+                data: null
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{project_id}/stop:
+    post:
+      tags: [Project]
+      summary: 停止评估任务
+      description: 停止评估任务。前置校验：项目状态须为 `running`，否则返回错误码 `2002`。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          description: 项目 ID
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 停止成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectStatusResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  project_id: 1
+                  project_status: stopped
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 状态冲突（非 running 状态停止）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                code: 2002
+                message: 当前状态不允许停止
+                data: null
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{project_id}/stages:
+    get:
+      tags: [Result]
+      summary: 查询阶段状态
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          description: 项目 ID
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StageListResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  list:
+                    - stage_name: environment_scan
+                      stage_status: success
+                      started_at: '2026-08-25T12:01:00Z'
+                      finished_at: '2026-08-25T12:03:00Z'
+                    - stage_name: code_analysis
+                      stage_status: running
+                      started_at: '2026-08-25T12:03:00Z'
+                      finished_at: null
+                    - stage_name: vulnerability_verify
+                      stage_status: pending
+                      started_at: null
+                      finished_at: null
+                    - stage_name: report_generate
+                      stage_status: pending
+                      started_at: null
+                      finished_at: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{project_id}/workers:
+    get:
+      tags: [Result]
+      summary: 查询角色执行状态
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          description: 项目 ID
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkerListResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  list:
+                    - id: 12
+                      worker_role: code_analyze
+                      task_status: running
+                      stage_name: code_analysis
+                      started_at: '2026-08-25T12:03:00Z'
+                      finished_at: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{project_id}/vulnerabilities:
+    get:
+      tags: [Result]
+      summary: 查询漏洞列表
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          description: 项目 ID
+          schema:
+            type: integer
+            format: int64
+        - name: risk_level
+          in: query
+          required: false
+          description: 按风险等级过滤
+          schema:
+            $ref: '#/components/schemas/RiskLevel'
+        - name: verify_status
+          in: query
+          required: false
+          description: 按验证状态过滤
+          schema:
+            $ref: '#/components/schemas/VerifyStatus'
+        - name: page
+          in: query
+          required: false
+          description: 页码，默认 1
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          required: false
+          description: 每页数量，默认 10
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VulnerabilityListResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  total: 3
+                  list:
+                    - id: 8
+                      vuln_code: VULN-0001
+                      vuln_title: SQL 注入
+                      risk_level: high
+                      file_path: src/UserService.java
+                      verify_status: verified
+                      created_at: '2026-08-25T12:10:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{project_id}/vulnerabilities/{vuln_id}:
+    get:
+      tags: [Result]
+      summary: 查询漏洞详情
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          description: 项目 ID
+          schema:
+            type: integer
+            format: int64
+        - name: vuln_id
+          in: path
+          required: true
+          description: 漏洞 ID
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VulnerabilityDetailResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  id: 8
+                  vuln_code: VULN-0001
+                  vuln_title: SQL 注入
+                  risk_level: high
+                  file_path: src/UserService.java
+                  condition_text: 未过滤用户输入
+                  evidence_text: '...'
+                  verify_status: verified
+                  reproduce_steps_text: '...'
+                  verify_code_text: '...'
+                  created_at: '2026-08-25T12:10:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{project_id}/attack-paths:
+    get:
+      tags: [Result]
+      summary: 查询攻击路径列表
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          description: 项目 ID
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttackPathListResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  total: 1
+                  list:
+                    - id: 5
+                      path_code: PATH-0001
+                      path_title: SQL 注入链
+                      path_summary: '...'
+                      final_impact_text: 数据泄露
+                      vuln_count: 2
+                      created_at: '2026-08-25T12:18:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{project_id}/attack-paths/{path_id}:
+    get:
+      tags: [Result]
+      summary: 查询攻击路径详情
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          description: 项目 ID
+          schema:
+            type: integer
+            format: int64
+        - name: path_id
+          in: path
+          required: true
+          description: 攻击路径 ID
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttackPathDetailResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  id: 5
+                  path_code: PATH-0001
+                  path_title: SQL 注入链
+                  path_summary: '...'
+                  final_impact_text: 数据泄露
+                  items:
+                    - step_order: 1
+                      step_text: 利用登录接口注入
+                      vuln_id: 8
+                      vuln_code: VULN-0001
+                      vuln_title: SQL 注入
+                    - step_order: 2
+                      step_text: 读取敏感数据
+                      vuln_id: 9
+                      vuln_code: VULN-0002
+                      vuln_title: 敏感信息泄露
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{project_id}/report:
+    get:
+      tags: [Result]
+      summary: 查询最终报告
+      description: 返回权威 Markdown 报告与派生 HTML 报告内容。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          description: 项目 ID
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  report_id: 3
+                  report_markdown: '# 安全评估报告\n...'
+                  report_html: '<h1>安全评估报告</h1>...'
+                  created_at: '2026-08-25T12:20:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{project_id}/report/download:
+    get:
+      tags: [Result]
+      summary: 下载报告
+      description: |
+        下载报告文件，返回 `application/octet-stream`，文件名为 `report-{project_id}.md`（P0 默认 Markdown）。
+        注意：本接口直接返回二进制文件流，不套用 `{ code, message, data }` 统一封装。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          description: 项目 ID
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 报告文件二进制流
+          headers:
+            Content-Disposition:
+              description: 附件下载文件名
+              schema:
+                type: string
+                example: 'attachment; filename="report-1.md"'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{project_id}/logs:
+    get:
+      tags: [Result]
+      summary: 查询运行日志
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          description: 项目 ID
+          schema:
+            type: integer
+            format: int64
+        - name: log_level
+          in: query
+          required: false
+          description: 按日志级别过滤
+          schema:
+            $ref: '#/components/schemas/LogLevel'
+        - name: page
+          in: query
+          required: false
+          description: 页码，默认 1
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          required: false
+          description: 每页数量，默认 10
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogListResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  total: 120
+                  list:
+                    - id: 900
+                      log_level: info
+                      log_content: '扫描 /src 目录...'
+                      stage_name: code_analysis
+                      created_at: '2026-08-25T12:04:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{project_id}/resources:
+    get:
+      tags: [Result]
+      summary: 查询资源消耗
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          description: 项目 ID
+          schema:
+            type: integer
+            format: int64
+        - name: limit
+          in: query
+          required: false
+          description: 返回最近 N 条记录，默认 100
+          schema:
+            type: integer
+            minimum: 1
+            default: 100
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceListResponse'
+              example:
+                code: 0
+                message: success
+                data:
+                  list:
+                    - cpu_usage: 42.5
+                      memory_usage: 512.0
+                      token_count: 12800
+                      recorded_at: '2026-08-25T12:05:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT 无状态令牌。登录接口返回 `access_token`，请求头携带
+        `Authorization: Bearer <token>`。默认有效期 24 小时（可经系统配置调整）。
+
+  responses:
+    BadRequest:
+      description: 参数校验失败（错误码 1001）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+          example:
+            code: 1001
+            message: 参数校验失败
+            data: null
+    Unauthorized:
+      description: 未认证 / 登录态失效（错误码 1002）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+          example:
+            code: 1002
+            message: 未认证或登录态已失效
+            data: null
+    Forbidden:
+      description: 权限不足（错误码 1003，非管理员操作管理接口）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+          example:
+            code: 1003
+            message: 权限不足
+            data: null
+    NotFound:
+      description: 资源不存在（错误码 2001）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+          example:
+            code: 2001
+            message: 资源不存在
+            data: null
+    Conflict:
+      description: 状态冲突（错误码 2002）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+          example:
+            code: 2002
+            message: 状态冲突
+            data: null
+    InternalError:
+      description: 内部错误（错误码 5000）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+          example:
+            code: 5000
+            message: 内部错误
+            data: null
+
+  schemas:
+    # ---------- 通用响应封装 ----------
+    ApiResponse:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: integer
+          description: 业务状态码，0 表示成功，非 0 表示业务错误（见错误码表）
+        message:
+          type: string
+          description: 状态说明
+        data:
+          description: 业务数据；列表接口为 `{ list, total }`，详情接口为对象，错误时为 null
+
+    # ---------- 认证与系统 ----------
+    InitRequest:
+      type: object
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+          description: 管理员用户名
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 64
+          description: 密码（8~64 位）
+
+    LoginRequest:
+      type: object
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+          description: 用户名
+        password:
+          type: string
+          format: password
+          description: 密码
+
+    UserOut:
+      type: object
+      required:
+        - id
+        - username
+        - role
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: 用户 ID
+        username:
+          type: string
+          description: 用户名
+        role:
+          type: string
+          enum: [admin, user]
+          description: 角色
+
+    InitResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/UserOut'
+
+    LoginData:
+      type: object
+      required:
+        - access_token
+        - token_type
+        - expires_in
+        - user
+      properties:
+        access_token:
+          type: string
+          description: JWT 访问令牌
+        token_type:
+          type: string
+          default: Bearer
+          description: 令牌类型
+        expires_in:
+          type: integer
+          description: 有效期（秒）
+        user:
+          $ref: '#/components/schemas/UserOut'
+
+    LoginResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/LoginData'
+
+    IsolationConfig:
+      type: object
+      properties:
+        default_image:
+          type: string
+          description: 隔离环境默认镜像
+        mount_readonly:
+          type: boolean
+          description: 源码是否只读挂载
+        network_mode:
+          type: string
+          description: 容器网络模式
+
+    TaskConfig:
+      type: object
+      properties:
+        default_timeout_seconds:
+          type: integer
+          description: 阶段默认超时（秒）
+        max_concurrency:
+          type: integer
+          description: 最大并行评估项目数
+
+    RetentionConfig:
+      type: object
+      properties:
+        days:
+          type: integer
+          description: 已完成项目文件保留天数
+
+    ConfigOut:
+      type: object
+      required:
+        - isolation
+        - task
+        - retention
+      properties:
+        isolation:
+          $ref: '#/components/schemas/IsolationConfig'
+        task:
+          $ref: '#/components/schemas/TaskConfig'
+        retention:
+          $ref: '#/components/schemas/RetentionConfig'
+
+    ConfigGetResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/ConfigOut'
+
+    ConfigUpdateRequest:
+      type: object
+      required:
+        - config
+      properties:
+        config:
+          type: object
+          description: 键值对，键遵循 SPEC §2.5（如 `task.max_concurrency`、`task.default_timeout_seconds`）
+          additionalProperties: true
+
+    ConfigPatchOut:
+      type: object
+      description: 更新后的配置片段（仅包含被更新的分组）
+      properties:
+        isolation:
+          $ref: '#/components/schemas/IsolationConfig'
+        task:
+          $ref: '#/components/schemas/TaskConfig'
+        retention:
+          $ref: '#/components/schemas/RetentionConfig'
+
+    ConfigPutResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/ConfigPatchOut'
+
+    # ---------- 项目 ----------
+    SourceType:
+      type: string
+      enum: [local_path, git_repo]
+      description: 源码类型
+
+    ProjectStatus:
+      type: string
+      enum: [created, running, completed, failed, stopped]
+      description: 项目状态
+
+    ProjectCreateRequest:
+      type: object
+      required:
+        - project_name
+        - source_type
+        - source_path
+      properties:
+        project_name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: 项目名称
+        source_type:
+          $ref: '#/components/schemas/SourceType'
+        source_path:
+          type: string
+          maxLength: 512
+          description: 本地路径或 Git 仓库地址
+        task_content:
+          type: string
+          description: 任务说明（可选）
+
+    ProjectCreatedOut:
+      type: object
+      required:
+        - id
+        - project_name
+        - source_type
+        - source_path
+        - project_status
+        - created_at
+      properties:
+        id:
+          type: integer
+          format: int64
+        project_name:
+          type: string
+        source_type:
+          $ref: '#/components/schemas/SourceType'
+        source_path:
+          type: string
+        task_content:
+          type: string
+        project_status:
+          $ref: '#/components/schemas/ProjectStatus'
+        created_at:
+          type: string
+          format: date-time
+
+    ProjectCreateResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/ProjectCreatedOut'
+
+    ProjectListItem:
+      type: object
+      required:
+        - id
+        - project_name
+        - source_type
+        - project_status
+      properties:
+        id:
+          type: integer
+          format: int64
+        project_name:
+          type: string
+        source_type:
+          $ref: '#/components/schemas/SourceType'
+        project_status:
+          $ref: '#/components/schemas/ProjectStatus'
+        last_started_at:
+          type: [string, "null"]
+          format: date-time
+        last_finished_at:
+          type: [string, "null"]
+          format: date-time
+
+    ProjectListData:
+      type: object
+      required:
+        - total
+        - list
+      properties:
+        total:
+          type: integer
+          description: 总条数
+        list:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProjectListItem'
+
+    ProjectListResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/ProjectListData'
+
+    ProjectDetailOut:
+      type: object
+      required:
+        - id
+        - project_name
+        - source_type
+        - source_path
+        - project_status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: integer
+          format: int64
+        project_name:
+          type: string
+        source_type:
+          $ref: '#/components/schemas/SourceType'
+        source_path:
+          type: string
+        task_content:
+          type: string
+        project_status:
+          $ref: '#/components/schemas/ProjectStatus'
+        vuln_count:
+          type: integer
+          description: 漏洞数量
+        attack_path_count:
+          type: integer
+          description: 攻击路径数量
+        report_status:
+          type: string
+          description: 报告状态（`none` / `generated`）
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ProjectDetailResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/ProjectDetailOut'
+
+    ProjectStatusData:
+      type: object
+      required:
+        - project_id
+        - project_status
+      properties:
+        project_id:
+          type: integer
+          format: int64
+        project_status:
+          $ref: '#/components/schemas/ProjectStatus'
+
+    ProjectStatusResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/ProjectStatusData'
+
+    ProjectDeleteData:
+      type: object
+      required:
+        - deleted_project_id
+      properties:
+        deleted_project_id:
+          type: integer
+          format: int64
+
+    ProjectDeleteResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/ProjectDeleteData'
+
+    # ---------- 阶段 / 角色 ----------
+    StageName:
+      type: string
+      enum: [environment_scan, code_analysis, vulnerability_verify, report_generate, done]
+      description: 阶段名称
+
+    StageStatus:
+      type: string
+      enum: [pending, running, success, failed]
+      description: 阶段状态
+
+    StageOut:
+      type: object
+      required:
+        - stage_name
+        - stage_status
+      properties:
+        stage_name:
+          $ref: '#/components/schemas/StageName'
+        stage_status:
+          $ref: '#/components/schemas/StageStatus'
+        started_at:
+          type: [string, "null"]
+          format: date-time
+        finished_at:
+          type: [string, "null"]
+          format: date-time
+
+    StageListData:
+      type: object
+      required: [list]
+      properties:
+        list:
+          type: array
+          items:
+            $ref: '#/components/schemas/StageOut'
+
+    StageListResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/StageListData'
+
+    WorkerRole:
+      type: string
+      enum: [generic, env_check, code_analyze, vuln_verify, report_gen, ops]
+      description: 角色类型
+
+    TaskStatus:
+      type: string
+      enum: [idle, running, success, failed]
+      description: 任务状态
+
+    WorkerTaskOut:
+      type: object
+      required:
+        - id
+        - worker_role
+        - task_status
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: 任务 ID
+        worker_role:
+          $ref: '#/components/schemas/WorkerRole'
+        task_status:
+          $ref: '#/components/schemas/TaskStatus'
+        stage_name:
+          $ref: '#/components/schemas/StageName'
+        started_at:
+          type: [string, "null"]
+          format: date-time
+        finished_at:
+          type: [string, "null"]
+          format: date-time
+
+    WorkerListData:
+      type: object
+      required: [list]
+      properties:
+        list:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkerTaskOut'
+
+    WorkerListResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/WorkerListData'
+
+    # ---------- 漏洞 ----------
+    RiskLevel:
+      type: string
+      enum: [critical, high, medium, low]
+      description: 风险等级
+
+    VerifyStatus:
+      type: string
+      enum: [unverified, verifying, verified, failed]
+      description: 验证状态
+
+    VulnerabilityOut:
+      type: object
+      required:
+        - id
+        - vuln_code
+        - vuln_title
+        - risk_level
+        - verify_status
+        - created_at
+      properties:
+        id:
+          type: integer
+          format: int64
+        vuln_code:
+          type: string
+          description: 漏洞编号（如 VULN-0001）
+        vuln_title:
+          type: string
+          description: 漏洞标题
+        risk_level:
+          $ref: '#/components/schemas/RiskLevel'
+        file_path:
+          type: [string, "null"]
+          description: 文件位置
+        verify_status:
+          $ref: '#/components/schemas/VerifyStatus'
+        created_at:
+          type: string
+          format: date-time
+
+    VulnerabilityListData:
+      type: object
+      required:
+        - total
+        - list
+      properties:
+        total:
+          type: integer
+        list:
+          type: array
+          items:
+            $ref: '#/components/schemas/VulnerabilityOut'
+
+    VulnerabilityListResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/VulnerabilityListData'
+
+    VulnerabilityDetailOut:
+      type: object
+      required:
+        - id
+        - vuln_code
+        - vuln_title
+        - risk_level
+        - verify_status
+        - created_at
+      properties:
+        id:
+          type: integer
+          format: int64
+        vuln_code:
+          type: string
+        vuln_title:
+          type: string
+        risk_level:
+          $ref: '#/components/schemas/RiskLevel'
+        file_path:
+          type: [string, "null"]
+        condition_text:
+          type: [string, "null"]
+          description: 触发条件
+        evidence_text:
+          type: [string, "null"]
+          description: 证据内容
+        verify_status:
+          $ref: '#/components/schemas/VerifyStatus'
+        reproduce_steps_text:
+          type: [string, "null"]
+          description: 复现步骤
+        verify_code_text:
+          type: [string, "null"]
+          description: 验证代码
+        created_at:
+          type: string
+          format: date-time
+
+    VulnerabilityDetailResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/VulnerabilityDetailOut'
+
+    # ---------- 攻击路径 ----------
+    AttackPathOut:
+      type: object
+      required:
+        - id
+        - path_code
+        - path_title
+        - created_at
+      properties:
+        id:
+          type: integer
+          format: int64
+        path_code:
+          type: string
+          description: 路径编号（如 PATH-0001）
+        path_title:
+          type: string
+          description: 路径标题
+        path_summary:
+          type: [string, "null"]
+          description: 路径摘要
+        final_impact_text:
+          type: [string, "null"]
+          description: 最终影响
+        vuln_count:
+          type: integer
+          description: 涉及漏洞数量
+        created_at:
+          type: string
+          format: date-time
+
+    AttackPathListData:
+      type: object
+      required:
+        - total
+        - list
+      properties:
+        total:
+          type: integer
+        list:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttackPathOut'
+
+    AttackPathListResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/AttackPathListData'
+
+    AttackPathItemOut:
+      type: object
+      required:
+        - step_order
+      properties:
+        step_order:
+          type: integer
+          description: 利用顺序
+        step_text:
+          type: [string, "null"]
+          description: 步骤说明
+        vuln_id:
+          type: integer
+          format: int64
+          description: 关联漏洞 ID
+        vuln_code:
+          type: string
+        vuln_title:
+          type: string
+
+    AttackPathDetailOut:
+      type: object
+      required:
+        - id
+        - path_code
+        - path_title
+        - items
+      properties:
+        id:
+          type: integer
+          format: int64
+        path_code:
+          type: string
+        path_title:
+          type: string
+        path_summary:
+          type: [string, "null"]
+        final_impact_text:
+          type: [string, "null"]
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttackPathItemOut'
+
+    AttackPathDetailResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/AttackPathDetailOut'
+
+    # ---------- 报告 ----------
+    ReportOut:
+      type: object
+      required:
+        - report_id
+        - created_at
+      properties:
+        report_id:
+          type: integer
+          format: int64
+        report_markdown:
+          type: string
+          description: Markdown 报告（权威版本）
+        report_html:
+          type: string
+          description: HTML 报告（派生版本）
+        created_at:
+          type: string
+          format: date-time
+
+    ReportResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/ReportOut'
+
+    # ---------- 日志 ----------
+    LogLevel:
+      type: string
+      enum: [debug, info, warn, error]
+      description: 日志级别
+
+    LogOut:
+      type: object
+      required:
+        - id
+        - log_level
+        - log_content
+        - created_at
+      properties:
+        id:
+          type: integer
+          format: int64
+        log_level:
+          $ref: '#/components/schemas/LogLevel'
+        log_content:
+          type: string
+          description: 日志内容
+        stage_name:
+          $ref: '#/components/schemas/StageName'
+        created_at:
+          type: string
+          format: date-time
+
+    LogListData:
+      type: object
+      required:
+        - total
+        - list
+      properties:
+        total:
+          type: integer
+        list:
+          type: array
+          items:
+            $ref: '#/components/schemas/LogOut'
+
+    LogListResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/LogListData'
+
+    # ---------- 资源消耗 ----------
+    ResourceUsageOut:
+      type: object
+      required:
+        - recorded_at
+      properties:
+        cpu_usage:
+          type: number
+          format: float
+          description: CPU 使用率（%）
+        memory_usage:
+          type: number
+          format: float
+          description: 内存使用量（MB）
+        token_count:
+          type: integer
+          description: LLM Token 消耗
+        recorded_at:
+          type: string
+          format: date-time
+
+    ResourceListData:
+      type: object
+      required: [list]
+      properties:
+        list:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResourceUsageOut'
+
+    ResourceListResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: '#/components/schemas/ResourceListData'

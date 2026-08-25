@@ -109,17 +109,19 @@
 - 状态管理选 **Zustand**（轻量、无样板），全局 `useProjectStore` 管理当前项目与 WebSocket 连接，局部状态用 React hooks。
 - 实时监控页、日志滚动用 WebSocket 数据驱动，MUI 表格 + 自绘资源图表。
 
-### 1.3 Open Questions 架构决策汇总
+### 1.3 Open Questions 架构决策汇总（已确认）
 
-| 编号 | 问题 | 架构决策 |
+> 状态说明：Q-1 ~ Q-10 均已确认（需求方答复已落地），下表为最终决策。
+
+| 编号 | 问题 | 最终决策 |
 | --- | --- | --- |
-| Q-1 | 认证方式 | JWT 无状态令牌，`Authorization: Bearer`，有效期默认 24h 可配，bcrypt 哈希密码 |
-| Q-2 | 隔离环境技术 | Docker 容器（docker-py），每项目一容器，源码只读挂载，网络隔离 |
-| Q-3 | 仓库地址类型 | P0 支持 `local_path`（本地路径）与 `git_repo`（Git HTTPS）；SVN 与私有凭据列为 P2 |
+| Q-1 | 认证方式 | JWT 无状态令牌：`Authorization: Bearer` + bcrypt 哈希密码，有效期默认 24h 可配；refresh token 列为 P2 |
+| Q-2 | 隔离环境技术 | Docker 容器（docker-py），每项目一容器，源码只读挂载，网络隔离；服务器配置要求最低。LLM token 消耗与隔离技术无关，通过本地白名单命令预筛 + 定向送审降低 token |
+| Q-3 | 仓库地址类型 | P0 支持 `local_path`（本地路径）与 `git_repo`（仅 Git 公开库 HTTPS，无需认证凭据）；不支持 SVN / 私有凭据 |
 | Q-4 | 关键字规则集 | P0 内置默认规则集（配置文件 `rules/default_keywords.yaml`），P2 支持用户自定义 |
 | Q-5 | 命令白名单 | 内置只读命令白名单（grep/find/cat/head/tail/sed -n 等）+ 容器网络隔离，验证命令在容器内执行且禁止出网 |
-| Q-6 | 风险/验证枚举 | risk_level：`critical/high/medium/low`；verify_status：`unverified/verifying/verified/failed` |
-| Q-7 | message_type 枚举 | `info/warn/error/success` |
+| Q-6 | 风险/验证枚举 | risk_level：`critical/high/medium/low`，对齐 CVSS v3.1 分级（Critical 9.0–10.0 / High 7.0–8.9 / Medium 4.0–6.9 / Low 0.1–3.9）；verify_status：`unverified/verifying/verified/failed`；CVE 关联（CVE ID + CVSS 分数/向量）列为 P2 增强（仅对依赖扫描类漏洞有意义） |
+| Q-7 | message_type 枚举 | `info/warning/error/critical` |
 | Q-8 | token_count 口径 | LLM Token（角色执行消耗的大模型 token 计数），资源监控页计量展示 |
 | Q-9 | 前端技术栈 | 遵循默认 Vite + React + MUI + Tailwind CSS |
 | Q-10 | 报告权威格式 | Markdown 为权威版本，HTML 为渲染派生版本；下载默认输出 Markdown（P2 支持 PDF/HTML） |
@@ -248,7 +250,7 @@ flowchart TB
 | project_id | BIGINT UNSIGNED | 否 | - | FK → projects.id，INDEX | 所属项目 |
 | vuln_code | VARCHAR(64) | 否 | - | - | 漏洞编号（如 VULN-0001） |
 | vuln_title | VARCHAR(255) | 否 | - | - | 漏洞标题 |
-| risk_level | VARCHAR(16) | 否 | - | INDEX | critical/high/medium/low |
+| risk_level | VARCHAR(16) | 否 | - | INDEX | critical/high/medium/low（对齐 CVSS v3.1 分级，见下表注） |
 | file_path | VARCHAR(512) | 是 | NULL | - | 文件位置 |
 | condition_text | TEXT | 是 | NULL | - | 触发条件 |
 | evidence_text | TEXT | 是 | NULL | - | 证据内容 |
@@ -258,6 +260,7 @@ flowchart TB
 | created_at | DATETIME | 否 | CURRENT_TIMESTAMP | - | 创建时间 |
 
 > 约束：`UNIQUE(project_id, vuln_code)`。
+> risk_level 对齐 **CVSS v3.1** 分级区间：Critical 9.0–10.0 / High 7.0–8.9 / Medium 4.0–6.9 / Low 0.1–3.9。CVE 关联（CVE ID + CVSS 分数/向量）列为 **P2** 增强，仅对依赖扫描类漏洞有意义。
 
 #### 2.2.6 attack_paths（攻击路径表）
 
@@ -292,7 +295,7 @@ flowchart TB
 | id | BIGINT UNSIGNED | 否 | AUTO_INCREMENT | PK | 消息 ID |
 | project_id | BIGINT UNSIGNED | 否 | - | FK → projects.id，INDEX | 所属项目 |
 | worker_role | VARCHAR(32) | 否 | - | - | 来源角色 |
-| message_type | VARCHAR(16) | 否 | 'info' | - | info/warn/error/success |
+| message_type | VARCHAR(16) | 否 | 'info' | - | info/warning/error/critical |
 | message_text | TEXT | 否 | - | - | 消息内容 |
 | created_at | DATETIME | 否 | CURRENT_TIMESTAMP | - | 创建时间 |
 
