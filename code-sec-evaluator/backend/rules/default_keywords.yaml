@@ -1,0 +1,111 @@
+# =============================================================================
+# 内置关键字规则集（SPEC §1.3 Q-4 决策：P0 内置默认规则集）
+# 说明：关键字为「字面量包含」匹配（非正则注入），按 rule 去重（每规则最多 1 个漏洞，
+#       证据聚合所有命中文件/行）；role 声明发现角色，与示例项目埋点清单对应。
+# =============================================================================
+version: "1.0"
+
+rules:
+  - id: hardcoded_secret
+    title: 硬编码密钥/口令
+    risk_level: critical
+    role: env_check
+    case_sensitive: false
+    description: 源码中直接出现 api_key / password / secret / 数据库连接串等明文凭据。
+    keywords:
+      - api_key
+      - password
+      - secret
+      - DATABASE_URL
+      - AWS_SECRET
+      - access_key
+
+  - id: debug_mode
+    title: 调试模式开启
+    risk_level: low
+    role: env_check
+    case_sensitive: true
+    description: 应用以 debug=True 运行，暴露调试器与堆栈信息。
+    keywords:
+      - "debug=True"
+
+  - id: sql_injection
+    title: SQL 注入
+    risk_level: high
+    role: code_analyze
+    case_sensitive: true
+    description: 字符串拼接 SQL 语句（SELECT/execute 等），未做参数化查询。
+    keywords:
+      - SELECT
+      - execute(
+
+  - id: command_injection_os_system
+    title: 命令注入（os.system）
+    risk_level: critical
+    role: code_analyze
+    case_sensitive: true
+    description: 使用 os.system 执行拼接的命令字符串，存在命令注入面。
+    keywords:
+      - os.system
+
+  - id: command_injection_subprocess
+    title: 命令注入（subprocess+shell）
+    risk_level: critical
+    role: code_analyze
+    case_sensitive: true
+    description: 使用 subprocess 且 shell=True（或直接 shell 调用）执行拼接命令。
+    keywords:
+      - subprocess
+      - "shell=True"
+      - shell
+
+  - id: code_injection_eval
+    title: 不安全 eval 执行
+    risk_level: critical
+    role: code_analyze
+    case_sensitive: true
+    description: 使用 eval 执行动态构造的代码，存在任意代码执行风险。
+    keywords:
+      - eval
+
+  - id: xss
+    title: 反射型 XSS
+    risk_level: medium
+    role: code_analyze
+    case_sensitive: true
+    description: 用户输入未经转义渲染到模板/HTML（render_template_string / | safe / innerHTML）。
+    keywords:
+      - render_template_string
+      - "| safe"
+      - innerHTML
+
+  - id: path_traversal
+    title: 路径穿越
+    risk_level: high
+    role: code_analyze
+    case_sensitive: true
+    description: 使用 os.path.join 拼接未校验的用户输入路径，可穿越读取任意文件。
+    keywords:
+      - os.path.join
+
+  - id: weak_crypto
+    title: 弱加密算法
+    risk_level: medium
+    role: code_analyze
+    case_sensitive: true
+    description: 使用 MD5 / SHA1 / AES-ECB 等已不安全的加密算法。
+    keywords:
+      - md5
+      - sha1
+      - ECB
+      - AES.MODE_ECB
+
+  - id: sensitive_info
+    title: 敏感信息泄露
+    risk_level: medium
+    role: code_analyze
+    case_sensitive: false
+    description: 日志/输出打印了敏感信息（口令、密钥、连接串等）。
+    keywords:
+      - logging
+      - "print("

@@ -1,0 +1,2 @@
+# 迁移版本目录：由 `alembic revision` / `alembic upgrade head` 管理。
+# 初始版本号迁移由部署时生成；本仓库默认采用 create_all + seed（见 scripts/init_db.py）。

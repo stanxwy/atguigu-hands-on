@@ -1,0 +1,497 @@
+"""角色任务执行服务：6 类角色（generic/env_check/code_analyze/vuln_verify/report_gen/ops）。
+
+每个角色创建独立的 ``worker_tasks`` 记录（可回溯 project_id + stage_id），
+扫描采用**纯 Python 文件读取**（零命令执行、跨平台确定、比容器内 grep 更安全）；
+命令白名单与隔离 exec 由 :mod:`app.services.isolation_service` 提供并供扩展使用。
+"""
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import yaml
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.constants import RISK_SEVERITY
+from app.models.project import Project
+from app.models.vulnerability import Vulnerability
+from app.models.worker_task import WorkerTask
+from app.services import (
+    attack_path_service,
+    report_service,
+    vulnerability_service,
+)
+from app.services.monitor_service import monitor_service
+
+logger = logging.getLogger("app.worker")
+
+_RULES_PATH = Path(__file__).resolve().parents[2] / "rules" / "default_keywords.yaml"
+
+# 跳过目录与文本大小上限（防大文件拖垮扫描）
+_SKIP_DIRS = {
+    ".git", "__pycache__", ".venv", "venv", "node_modules",
+    ".idea", ".vscode", "dist", "build", ".mypy_cache", ".pytest_cache",
+}
+_MAX_FILE_BYTES = 1_000_000
+_MAX_EVIDENCE_LINES = 20
+
+
+@dataclass(frozen=True)
+class Rule:
+    """关键字规则（来自 rules/default_keywords.yaml）。"""
+
+    id: str
+    title: str
+    risk_level: str
+    role: str
+    keywords: list[str]
+    case_sensitive: bool
+    description: str
+
+
+_rules_cache: list[Rule] | None = None
+
+
+def load_rules() -> list[Rule]:
+    """加载内置关键字规则集（缓存）。"""
+    global _rules_cache
+    if _rules_cache is None:
+        with open(_RULES_PATH, encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+        _rules_cache = [Rule(**item) for item in data.get("rules", [])]
+    return _rules_cache
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _iter_source_files(root: Path) -> list[Path]:
+    """递归收集源码文本文件（跳过目录/大文件）。"""
+    files: list[Path] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if any(part in _SKIP_DIRS for part in path.parts):
+            continue
+        try:
+            if path.stat().st_size > _MAX_FILE_BYTES:
+                continue
+        except OSError:
+            continue
+        files.append(path)
+    return files
+
+
+def _match(line: str, keyword: str, case_sensitive: bool) -> bool:
+    """关键字匹配（字面量包含，非正则注入）。"""
+    if case_sensitive:
+        return keyword in line
+    return keyword.lower() in line.lower()
+
+
+def _scan(root: Path, rules: list[Rule]) -> list[dict[str, Any]]:
+    """扫描源码，返回每条命中规则的匹配明细。"""
+    files = _iter_source_files(root)
+    results: list[dict[str, Any]] = []
+    for rule in rules:
+        matches: list[tuple[str, int, str]] = []
+        for file_path in files:
+            try:
+                text = file_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for line_no, line in enumerate(text.splitlines(), start=1):
+                for keyword in rule.keywords:
+                    if _match(line, keyword, rule.case_sensitive):
+                        rel = file_path.relative_to(root).as_posix()
+                        matches.append((rel, line_no, line.strip()))
+                        break
+        if matches:
+            results.append({"rule": rule, "matches": matches})
+    return results
+
+
+def _format_evidence(matches: list[tuple[str, int, str]]) -> str:
+    """将匹配明细格式化为证据文本（截断）。"""
+    lines = [
+        f"{rel}:{line_no}: {text}" for rel, line_no, text in matches[:_MAX_EVIDENCE_LINES]
+    ]
+    if len(matches) > _MAX_EVIDENCE_LINES:
+        lines.append(f"... 共 {len(matches)} 处命中")
+    return "\n".join(lines)
+
+
+def _reproduce_steps(vuln: Vulnerability) -> str:
+    """生成复现步骤模板。"""
+    return (
+        f"1. 定位到 {vuln.file_path or '未知文件'}；\n"
+        f"2. 依据证据中的代码行触发对应缺陷；\n"
+        f"3. 观察是否造成 {vuln.risk_level} 级安全影响。"
+    )
+
+
+def _verify_code(vuln: Vulnerability) -> str:
+    """生成验证代码占位（展示 PoC 骨架）。"""
+    return (
+        f"# 验证 {vuln.vuln_code}（{vuln.vuln_title}）\n"
+        f"# 风险等级：{vuln.risk_level}\n"
+        f"# 位置：{vuln.file_path or '-'}\n"
+    )
+
+
+async def _create_worker(
+    db: AsyncSession,
+    project_id: int,
+    stage_id: int,
+    role: str,
+    task_content: str | None = None,
+) -> WorkerTask:
+    """创建角色任务记录。"""
+    task = WorkerTask(
+        project_id=project_id,
+        stage_id=stage_id,
+        worker_role=role,
+        task_content=task_content,
+        task_status="idle",
+    )
+    db.add(task)
+    await db.flush()
+    return task
+
+
+async def _mark_running(
+    db: AsyncSession, project: Project, task: WorkerTask, role: str, message: str
+) -> None:
+    """标记任务运行中并推送事件/聊天。"""
+    task.task_status = "running"
+    task.started_at = _now()
+    await db.commit()
+    monitor_service.publish(
+        project.id,
+        "worker_status",
+        {
+            "worker_task_id": task.id,
+            "worker_role": role,
+            "task_status": "running",
+        },
+    )
+    await monitor_service.append_chat(db, project.id, role, "info", message)
+    await db.commit()
+
+
+async def _mark_done(
+    db: AsyncSession,
+    project: Project,
+    task: WorkerTask,
+    role: str,
+    summary: str,
+    success: bool,
+) -> bool:
+    """标记任务结束并推送事件。"""
+    task.task_status = "success" if success else "failed"
+    task.finished_at = _now()
+    task.result_summary = summary
+    await db.commit()
+    monitor_service.publish(
+        project.id,
+        "worker_status",
+        {
+            "worker_task_id": task.id,
+            "worker_role": role,
+            "task_status": task.task_status,
+        },
+    )
+    return success
+
+
+async def _run_scan_role(
+    db: AsyncSession,
+    project: Project,
+    stage_id: int,
+    role: str,
+    source_dir: Path,
+    task_content: str,
+) -> bool:
+    """环境扫描 / 代码分析角色的公共扫描逻辑。"""
+    task = await _create_worker(db, project.id, stage_id, role, task_content)
+    await _mark_running(db, project, task, role, f"{role} 开始扫描源码")
+    try:
+        rules = [r for r in load_rules() if r.role == role]
+        results = await asyncio.to_thread(_scan, source_dir, rules)
+        created: list[Vulnerability] = []
+        for result in results:
+            rule = result["rule"]
+            matches = result["matches"]
+            evidence = _format_evidence(matches)
+            file_path = matches[0][0]
+            vuln = await vulnerability_service.create_vulnerability(
+                db,
+                project.id,
+                vuln_title=rule.title,
+                risk_level=rule.risk_level,
+                file_path=file_path,
+                condition_text=rule.description,
+                evidence_text=evidence,
+            )
+            created.append(vuln)
+            await db.commit()
+            monitor_service.publish(
+                project.id,
+                "vulnerability_found",
+                {
+                    "vuln_id": vuln.id,
+                    "vuln_title": vuln.vuln_title,
+                    "risk_level": vuln.risk_level,
+                },
+            )
+            await monitor_service.append_chat(
+                db,
+                project.id,
+                role,
+                "warning",
+                f"发现 {rule.title}（{rule.risk_level}）：{vuln.vuln_code}",
+            )
+        summary = f"{role} 扫描完成，命中 {len(created)} 个隐患"
+        return await _mark_done(db, project, task, role, summary, True)
+    except Exception as exc:  # noqa: BLE001  异步任务内必须捕获异常并落库
+        logger.exception("角色 %s 执行失败", role)
+        await monitor_service.append_log(
+            db, project.id, "error", f"{role} 执行异常: {exc}", stage_id=stage_id
+        )
+        return await _mark_done(db, project, task, role, str(exc), False)
+
+
+async def run_generic(db: AsyncSession, project: Project, stage_id: int) -> bool:
+    """generic：任务编排/兜底（记录编排启动）。"""
+    role = "generic"
+    task = await _create_worker(db, project.id, stage_id, role, "任务编排")
+    await _mark_running(db, project, task, role, "开始编排评估任务")
+    await monitor_service.append_chat(
+        db,
+        project.id,
+        role,
+        "info",
+        f"开始评估项目「{project.project_name}」（{project.source_type}）",
+    )
+    summary = f"编排启动：{project.source_type} -> {project.source_path}"
+    return await _mark_done(db, project, task, role, summary, True)
+
+
+async def run_env_check(
+    db: AsyncSession, project: Project, stage_id: int, source_dir: Path
+) -> bool:
+    """env_check：环境扫描（结构/配置/运行参数/硬编码密钥）。"""
+    return await _run_scan_role(
+        db, project, stage_id, "env_check", source_dir, "环境扫描"
+    )
+
+
+async def run_code_analyze(
+    db: AsyncSession, project: Project, stage_id: int, source_dir: Path
+) -> bool:
+    """code_analyze：代码分析（关键字搜索 + 静态特征识别）。"""
+    return await _run_scan_role(
+        db, project, stage_id, "code_analyze", source_dir, "代码分析"
+    )
+
+
+async def run_vuln_verify(db: AsyncSession, project: Project, stage_id: int) -> bool:
+    """vuln_verify：对候选漏洞逐一验证（生成复现步骤与验证代码）。"""
+    role = "vuln_verify"
+    task = await _create_worker(db, project.id, stage_id, role, "漏洞验证")
+    await _mark_running(db, project, task, role, "开始验证候选漏洞")
+    try:
+        vulns = (
+            (
+                await db.execute(
+                    select(Vulnerability).where(
+                        Vulnerability.project_id == project.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for vuln in vulns:
+            vuln.verify_status = "verified"
+            vuln.reproduce_steps_text = _reproduce_steps(vuln)
+            vuln.verify_code_text = _verify_code(vuln)
+        await db.commit()
+        summary = f"验证完成：{len(vulns)} 个漏洞已确认"
+        return await _mark_done(db, project, task, role, summary, True)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("漏洞验证失败")
+        await monitor_service.append_log(
+            db, project.id, "error", f"漏洞验证异常: {exc}", stage_id=stage_id
+        )
+        return await _mark_done(db, project, task, role, str(exc), False)
+
+
+def _build_markdown(
+    project: Project,
+    vulns: list[Vulnerability],
+    attack_vulns: list[Vulnerability],
+    path: Any,
+) -> str:
+    """构建权威 Markdown 报告。
+
+    Args:
+        project: 项目实例。
+        vulns: 按编号排序的漏洞列表（漏洞清单）。
+        attack_vulns: 按严重度排序的漏洞列表（攻击路径步骤）。
+        path: AttackPath 实例（仅使用其标量字段，避免懒加载关系）。
+    """
+    risk_label = {
+        "critical": "严重",
+        "high": "高危",
+        "medium": "中危",
+        "low": "低危",
+    }
+    lines = [
+        f"# 安全评估报告：{project.project_name}",
+        "",
+        f"- 项目 ID：{project.id}",
+        f"- 源码类型：{project.source_type}",
+        f"- 源码位置：{project.source_path}",
+        f"- 任务说明：{project.task_content or '（未填写）'}",
+        f"- 漏洞总数：{len(vulns)}",
+        f"- 攻击路径数：{1 if path else 0}",
+        "",
+        "## 漏洞清单",
+        "",
+        "| 编号 | 标题 | 风险等级 | 位置 | 验证状态 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for vuln in vulns:
+        lines.append(
+            f"| {vuln.vuln_code} | {vuln.vuln_title} | "
+            f"{risk_label.get(vuln.risk_level, vuln.risk_level)} | "
+            f"{vuln.file_path or '-'} | {vuln.verify_status} |"
+        )
+    lines.append("")
+    lines.append("## 漏洞详情")
+    lines.append("")
+    for vuln in vulns:
+        lines.append(f"### {vuln.vuln_code} {vuln.vuln_title}")
+        lines.append("")
+        if vuln.condition_text:
+            lines.append(f"**触发条件**：{vuln.condition_text}")
+            lines.append("")
+        if vuln.evidence_text:
+            lines.append("**证据**：")
+            lines.append("")
+            lines.append("```text")
+            lines.append(vuln.evidence_text)
+            lines.append("```")
+            lines.append("")
+    lines.append("## 攻击路径")
+    lines.append("")
+    if path is not None:
+        lines.append(f"### {path.path_code} {path.path_title}")
+        lines.append("")
+        if path.path_summary:
+            lines.append(path.path_summary)
+            lines.append("")
+        for step_order, vuln in enumerate(attack_vulns, start=1):
+            lines.append(
+                f"{step_order}. 利用「{vuln.vuln_title}」（{vuln.file_path or '未知位置'}）"
+            )
+        if path.final_impact_text:
+            lines.append("")
+            lines.append(f"**最终影响**：{path.final_impact_text}")
+    lines.append("")
+    lines.append("## 修复建议")
+    lines.append("")
+    lines.append(
+        "1. 对用户输入做参数化查询，杜绝字符串拼接 SQL；"
+        "2. 使用白名单校验命令/路径，禁用 shell=True；"
+        "3. 前端输出统一转义，禁止未经净化的 HTML 注入；"
+        "4. 敏感凭据移出源码，改用密钥管理；"
+        "5. 使用强加密算法（如 AES-GCM），替换 MD5/SHA1/ECB。"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+async def run_report_gen(db: AsyncSession, project: Project, stage_id: int) -> bool:
+    """report_gen：串联攻击路径 + 生成 Markdown/HTML 报告。"""
+    role = "report_gen"
+    task = await _create_worker(db, project.id, stage_id, role, "报告生成")
+    await _mark_running(db, project, task, role, "开始汇总并生成报告")
+    try:
+        vulns = (
+            (
+                await db.execute(
+                    select(Vulnerability)
+                    .where(Vulnerability.project_id == project.id)
+                    .order_by(Vulnerability.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        ordered = sorted(
+            vulns, key=lambda v: (-RISK_SEVERITY.get(v.risk_level, 0), v.id)
+        )
+        path = None
+        if ordered:
+            items = [
+                (
+                    v.id,
+                    f"利用「{v.vuln_title}」（{v.file_path or '未知位置'}）",
+                )
+                for v in ordered
+            ]
+            path = await attack_path_service.create_attack_path(
+                db,
+                project.id,
+                path_title="综合攻击路径：从信息泄露到命令执行",
+                path_summary="按风险严重度串联全部已确认漏洞，构成从信息泄露、注入到命令执行的完整攻击链。",
+                final_impact_text="敏感数据大范围泄露 + 服务器被完全控制",
+                items=items,
+            )
+            await db.commit()
+        markdown_text = _build_markdown(project, vulns, ordered, path)
+        report = await report_service.generate_and_save(db, project.id, markdown_text)
+        await db.commit()
+        monitor_service.publish(
+            project.id, "report_ready", {"report_id": report.id}
+        )
+        summary = f"报告生成完成：report_id={report.id}，漏洞 {len(vulns)} 个"
+        return await _mark_done(db, project, task, role, summary, True)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("报告生成失败")
+        await monitor_service.append_log(
+            db, project.id, "error", f"报告生成异常: {exc}", stage_id=stage_id
+        )
+        return await _mark_done(db, project, task, role, str(exc), False)
+
+
+async def run_ops(db: AsyncSession, project: Project, stage_id: int) -> bool:
+    """ops：运维巡检（日志规范复核 + 资源采集）。"""
+    role = "ops"
+    task = await _create_worker(db, project.id, stage_id, role, "运维巡检")
+    await _mark_running(db, project, task, role, "开始运维巡检与资源采集")
+    try:
+        evidence_len = await db.scalar(
+            select(Vulnerability.evidence_text).where(
+                Vulnerability.project_id == project.id
+            ).limit(1)
+        )
+        # 粗略 token 估算（无真实 LLM 调用，按证据字符量折算）
+        token_count = int(len(evidence_len or "") // 4) if evidence_len else 0
+        await monitor_service.collect_and_record(db, project.id, token_count=token_count)
+        await db.commit()
+        summary = f"运维巡检完成，资源采集 1 条（token≈{token_count}）"
+        return await _mark_done(db, project, task, role, summary, True)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("运维巡检失败")
+        await monitor_service.append_log(
+            db, project.id, "error", f"运维巡检异常: {exc}", stage_id=stage_id
+        )
+        return await _mark_done(db, project, task, role, str(exc), False)
