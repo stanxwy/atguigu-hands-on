@@ -25,12 +25,15 @@ import { LoadingState } from '@/components/common/LoadingState';
 import { StatusTag } from '@/components/common/StatusTag';
 import { StageStepper } from '@/components/monitor/StageStepper';
 import { usePolling } from '@/hooks/usePolling';
+import { useWebSocket } from '@/hooks/useWebSocket';
 import { useProjectStore } from '@/store/projectStore';
+import { useWsStore } from '@/store/wsStore';
 import type { AsyncStatus } from '@/types/api';
 import type { StageItem } from '@/types/stage';
 import { formatDateTime } from '@/utils/format';
 import { REPORT_STATUS_LABELS, SOURCE_TYPE_LABELS } from '@/utils/labels';
 import { isProjectStartable, isProjectStoppable } from '@/utils/projectStatus';
+import { mergeStageEvents } from '@/utils/wsMerge';
 
 const DETAIL_TABS = [
   { label: '概览', path: '' },
@@ -81,6 +84,8 @@ export function ProjectDetail() {
   const operationError = useProjectStore((state) => state.operationError);
 
   const [dialog, setDialog] = useState<DetailDialogKind | null>(null);
+
+  useWebSocket(projectId);
 
   useEffect(() => {
     if (Number.isNaN(projectId)) {
@@ -255,6 +260,7 @@ export function ProjectDetail() {
 /** 项目概览：基本信息 + 统计 + 阶段状态（运行中每 5 秒刷新）。 */
 export function ProjectOverview() {
   const detail = useProjectStore((state) => state.detail);
+  const stageEvents = useWsStore((state) => state.stageEvents);
   const [stages, setStages] = useState<StageItem[]>([]);
   const [stagesStatus, setStagesStatus] = useState<AsyncStatus>('idle');
   const [stagesError, setStagesError] = useState<string | null>(null);
@@ -278,6 +284,13 @@ export function ProjectOverview() {
     }
     void loadStages(detail.id);
   }, [detail, loadStages]);
+
+  useEffect(() => {
+    if (stageEvents.length === 0) {
+      return;
+    }
+    setStages((prev) => mergeStageEvents(prev, stageEvents));
+  }, [stageEvents]);
 
   usePolling(
     () => {
