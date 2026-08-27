@@ -168,7 +168,7 @@ export function AppLayout() {
         sx={{ flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}
       >
         <Toolbar />
-        <Box sx={{ p: 3, flexGrow: 1, bgcolor: 'background.default' }}>
+        <Box sx={{ p: { xs: 2, md: 3 }, flexGrow: 1, bgcolor: 'background.default' }}>
           <Outlet />
         </Box>
       </Box>
