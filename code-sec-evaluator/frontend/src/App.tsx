@@ -11,9 +11,15 @@ import { AUTH_UNAUTHORIZED_EVENT } from '@/api/client';
 import { AdminRoute } from '@/components/layout/AdminRoute';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { ProtectedRoute } from '@/components/layout/ProtectedRoute';
+import { AttackPathList } from '@/pages/AttackPathList';
 import { Login } from '@/pages/Login';
+import { Monitor } from '@/pages/Monitor';
+import { ProjectCreate } from '@/pages/ProjectCreate';
+import { ProjectDetail, ProjectOverview } from '@/pages/ProjectDetail';
 import { ProjectList } from '@/pages/ProjectList';
+import { Report } from '@/pages/Report';
 import { SystemConfig } from '@/pages/SystemConfig';
+import { VulnerabilityList } from '@/pages/VulnerabilityList';
 import { useAuthStore } from '@/store/authStore';
 
 /** 登录失效监听：Axios 拦截器触发 1002/401 时清理会话并回到登录页。 */
@@ -55,7 +61,42 @@ const router = createBrowserRouter([
           },
           {
             path: 'projects',
-            element: <ProjectList />,
+            children: [
+              {
+                index: true,
+                element: <ProjectList />,
+              },
+              {
+                path: 'new',
+                element: <ProjectCreate />,
+              },
+              {
+                path: ':projectId',
+                element: <ProjectDetail />,
+                children: [
+                  {
+                    index: true,
+                    element: <ProjectOverview />,
+                  },
+                  {
+                    path: 'monitor',
+                    element: <Monitor />,
+                  },
+                  {
+                    path: 'vulnerabilities',
+                    element: <VulnerabilityList />,
+                  },
+                  {
+                    path: 'attack-paths',
+                    element: <AttackPathList />,
+                  },
+                  {
+                    path: 'report',
+                    element: <Report />,
+                  },
+                ],
+              },
+            ],
           },
           {
             path: 'system/config',
