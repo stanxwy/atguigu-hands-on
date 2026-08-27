@@ -23,6 +23,14 @@ export class ApiBusinessError extends Error {
   }
 }
 
+/** 将未知异常归一化为可展示的错误文案。 */
+export function getErrorMessage(error: unknown): string {
+  if (error instanceof ApiBusinessError || error instanceof Error) {
+    return error.message;
+  }
+  return '网络请求失败';
+}
+
 function isApiResponse(value: unknown): value is ApiResponse<unknown> {
   return (
     typeof value === 'object' &&
