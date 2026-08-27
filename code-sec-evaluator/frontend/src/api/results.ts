@@ -1,5 +1,6 @@
 import type { Paginated } from '@/types/api';
 import type { AttackPathDetail, AttackPathListItem } from '@/types/attackPath';
+import type { LogLevel } from '@/types/enums';
 import type { RuntimeLogItem } from '@/types/log';
 import type { ReportData } from '@/types/report';
 import type { ResourceUsageItem } from '@/types/resource';
@@ -89,7 +90,7 @@ export async function downloadReport(projectId: number): Promise<void> {
 /** 分页查询运行日志（可按级别过滤）。 */
 export function listLogs(
   projectId: number,
-  params: { log_level?: string; page?: number; page_size?: number } = {},
+  params: { log_level?: LogLevel | ''; page?: number; page_size?: number } = {},
 ): Promise<Paginated<RuntimeLogItem>> {
   return request<Paginated<RuntimeLogItem>>({
     url: `/projects/${projectId}/logs`,

@@ -11,6 +11,7 @@ import { AUTH_UNAUTHORIZED_EVENT } from '@/api/client';
 import { AdminRoute } from '@/components/layout/AdminRoute';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { ProtectedRoute } from '@/components/layout/ProtectedRoute';
+import { AttackPathDetail } from '@/pages/AttackPathDetail';
 import { AttackPathList } from '@/pages/AttackPathList';
 import { Login } from '@/pages/Login';
 import { Monitor } from '@/pages/Monitor';
@@ -19,6 +20,7 @@ import { ProjectDetail, ProjectOverview } from '@/pages/ProjectDetail';
 import { ProjectList } from '@/pages/ProjectList';
 import { Report } from '@/pages/Report';
 import { SystemConfig } from '@/pages/SystemConfig';
+import { VulnerabilityDetail } from '@/pages/VulnerabilityDetail';
 import { VulnerabilityList } from '@/pages/VulnerabilityList';
 import { useAuthStore } from '@/store/authStore';
 
@@ -87,8 +89,16 @@ const router = createBrowserRouter([
                     element: <VulnerabilityList />,
                   },
                   {
+                    path: 'vulnerabilities/:vulnId',
+                    element: <VulnerabilityDetail />,
+                  },
+                  {
                     path: 'attack-paths',
                     element: <AttackPathList />,
+                  },
+                  {
+                    path: 'attack-paths/:pathId',
+                    element: <AttackPathDetail />,
                   },
                   {
                     path: 'report',
