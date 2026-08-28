@@ -8,6 +8,11 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +23,7 @@ from app.config import settings
 from app.core.errors import AppError
 from app.database import async_session_factory, init_models
 from app.services import config_service
+from app.services.llm_service import llm_service
 from app.utils.logging import mask
 
 logger = logging.getLogger("app.main")
@@ -39,7 +45,9 @@ async def lifespan(_app: FastAPI):
             await db.commit()
     except Exception as exc:  # noqa: BLE001  见说明
         logger.warning("启动初始化失败（可稍后运行 scripts/init_db.py 重试）: %s", exc)
+    llm_service.reset()
     yield
+    await llm_service.aclose()
 
 
 app = FastAPI(

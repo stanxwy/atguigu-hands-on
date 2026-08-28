@@ -155,11 +155,20 @@ class Scheduler:
         if project is None:
             return
 
+        logger.info("项目 %s 开始执行流水线，解析源码目录", project_id)
         await monitor_service.append_log(
             db, project_id, "info", "开始准备隔离环境"
         )
         source_dir = await isolation_service.resolve_source_dir(project)
+        logger.info("项目 %s 源码目录已解析: %s", project_id, source_dir)
+        await monitor_service.append_log(
+            db, project_id, "info", f"源码目录已解析: {source_dir}"
+        )
         await isolation_service.prepare_environment(db, project, source_dir)
+        logger.info("项目 %s 隔离环境已准备", project_id)
+        await monitor_service.append_log(
+            db, project_id, "info", "隔离环境已准备"
+        )
         await db.commit()
 
         for stage_name in STAGE_ORDER:
@@ -174,6 +183,10 @@ class Scheduler:
             stage.stage_status = "running"
             stage.started_at = datetime.now(UTC)
             await db.commit()
+            logger.info("项目 %s 开始阶段: %s", project_id, stage_name)
+            await monitor_service.append_log(
+                db, project_id, "info", f"开始阶段: {stage_name}"
+            )
             monitor_service.publish(
                 project_id,
                 "stage_status",
@@ -183,6 +196,7 @@ class Scheduler:
             stage_ok = True
             for role in STAGE_ROLES.get(stage_name, []):
                 role_ok = await self._dispatch_role(db, project, stage, role, source_dir)
+                logger.info("项目 %s 角色 %s 执行完成: %s", project_id, role, role_ok)
                 if not role_ok:
                     stage_ok = False
                     break
@@ -192,6 +206,10 @@ class Scheduler:
                 stage.finished_at = datetime.now(UTC)
                 stage.error_message = f"阶段 {stage_name} 角色执行失败"
                 await db.commit()
+                logger.warning("项目 %s 阶段 %s 执行失败", project_id, stage_name)
+                await monitor_service.append_log(
+                    db, project_id, "error", f"阶段 {stage_name} 执行失败"
+                )
                 monitor_service.publish(
                     project_id,
                     "stage_status",
@@ -204,6 +222,10 @@ class Scheduler:
             stage.stage_status = "success"
             stage.finished_at = datetime.now(UTC)
             await db.commit()
+            logger.info("项目 %s 阶段 %s 执行成功", project_id, stage_name)
+            await monitor_service.append_log(
+                db, project_id, "info", f"阶段 {stage_name} 执行成功"
+            )
             monitor_service.publish(
                 project_id,
                 "stage_status",
@@ -220,6 +242,7 @@ class Scheduler:
         await db.commit()
 
         await isolation_service.destroy_environment(project_id)
+        logger.info("项目 %s 隔离环境已销毁", project_id)
         await self._finalize(db, project_id, "completed")
 
     async def _dispatch_role(
@@ -253,6 +276,10 @@ class Scheduler:
         if project is not None:
             project.project_status = status
         await db.commit()
+        logger.info("项目 %s 进入终态: %s", project_id, status)
+        await monitor_service.append_log(
+            db, project_id, "info", f"项目状态: {status}"
+        )
         monitor_service.publish(
             project_id, "project_status", {"project_status": status}
         )

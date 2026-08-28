@@ -222,6 +222,17 @@ async def _run_scan_role(
     await _mark_running(db, project, task, role, f"{role} 开始扫描源码")
     try:
         rules = [r for r in load_rules() if r.role == role]
+        files = _iter_source_files(source_dir)
+        logger.info(
+            "项目 %s 角色 %s 开始扫描: %d 个文件, %d 条规则",
+            project.id, role, len(files), len(rules),
+        )
+        await monitor_service.append_log(
+            db, project.id, "info",
+            f"{role} 开始扫描: {len(files)} 个文件, {len(rules)} 条规则",
+            stage_id=stage_id,
+        )
+        await db.commit()
         results = await asyncio.to_thread(_scan, source_dir, rules)
         created: list[Vulnerability] = []
         for result in results:
@@ -229,6 +240,15 @@ async def _run_scan_role(
             matches = result["matches"]
             evidence = _format_evidence(matches)
             file_path = matches[0][0]
+            logger.info(
+                "项目 %s 角色 %s 命中规则 %s（%s）: %d 处，首处 %s",
+                project.id, role, rule.title, rule.risk_level, len(matches), file_path,
+            )
+            await monitor_service.append_log(
+                db, project.id, "info",
+                f"命中规则 {rule.title}（{rule.risk_level}）: {len(matches)} 处",
+                stage_id=stage_id,
+            )
             vuln = await vulnerability_service.create_vulnerability(
                 db,
                 project.id,
@@ -256,6 +276,16 @@ async def _run_scan_role(
                 "warning",
                 f"发现 {rule.title}（{rule.risk_level}）：{vuln.vuln_code}",
             )
+        logger.info(
+            "项目 %s 角色 %s 扫描完成，命中 %d 个隐患",
+            project.id, role, len(created),
+        )
+        await monitor_service.append_log(
+            db, project.id, "info",
+            f"{role} 扫描完成，命中 {len(created)} 个隐患",
+            stage_id=stage_id,
+        )
+        await db.commit()
         summary = f"{role} 扫描完成，命中 {len(created)} 个隐患"
         return await _mark_done(db, project, task, role, summary, True)
     except Exception as exc:  # noqa: BLE001  异步任务内必须捕获异常并落库
@@ -321,6 +351,21 @@ async def run_vuln_verify(db: AsyncSession, project: Project, stage_id: int) -> 
             vuln.verify_status = "verified"
             vuln.reproduce_steps_text = _reproduce_steps(vuln)
             vuln.verify_code_text = _verify_code(vuln)
+            logger.info(
+                "项目 %s 验证漏洞 %s: %s（%s）",
+                project.id, vuln.vuln_code, vuln.vuln_title, vuln.risk_level,
+            )
+            await monitor_service.append_log(
+                db, project.id, "info",
+                f"验证漏洞 {vuln.vuln_code}: {vuln.vuln_title}（{vuln.risk_level}）",
+                stage_id=stage_id,
+            )
+        await db.commit()
+        logger.info("项目 %s 漏洞验证完成，共 %d 个", project.id, len(vulns))
+        await monitor_service.append_log(
+            db, project.id, "info", f"漏洞验证完成，共 {len(vulns)} 个",
+            stage_id=stage_id,
+        )
         await db.commit()
         summary = f"验证完成：{len(vulns)} 个漏洞已确认"
         return await _mark_done(db, project, task, role, summary, True)
@@ -459,6 +504,16 @@ async def run_report_gen(db: AsyncSession, project: Project, stage_id: int) -> b
         markdown_text = _build_markdown(project, vulns, ordered, path)
         report = await report_service.generate_and_save(db, project.id, markdown_text)
         await db.commit()
+        logger.info(
+            "项目 %s 报告已生成: report_id=%s，漏洞 %d 个",
+            project.id, report.id, len(vulns),
+        )
+        await monitor_service.append_log(
+            db, project.id, "info",
+            f"报告已生成: report_id={report.id}，漏洞 {len(vulns)} 个",
+            stage_id=stage_id,
+        )
+        await db.commit()
         monitor_service.publish(
             project.id, "report_ready", {"report_id": report.id}
         )
@@ -486,6 +541,13 @@ async def run_ops(db: AsyncSession, project: Project, stage_id: int) -> bool:
         # 粗略 token 估算（无真实 LLM 调用，按证据字符量折算）
         token_count = int(len(evidence_len or "") // 4) if evidence_len else 0
         await monitor_service.collect_and_record(db, project.id, token_count=token_count)
+        await db.commit()
+        logger.info("项目 %s 运维巡检完成，token 估算 %d", project.id, token_count)
+        await monitor_service.append_log(
+            db, project.id, "info",
+            f"运维巡检完成，资源采集 1 条（token≈{token_count}）",
+            stage_id=stage_id,
+        )
         await db.commit()
         summary = f"运维巡检完成，资源采集 1 条（token≈{token_count}）"
         return await _mark_done(db, project, task, role, summary, True)

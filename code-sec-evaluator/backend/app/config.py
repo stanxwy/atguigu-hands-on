@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     # ---- 保留 ----
     retention_days: int = 30
 
+    # ---- LLM 分析（默认关闭；开启后作为规则预筛之上的语义增强层）----
+    llm_enabled: bool = False
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
+    llm_timeout_seconds: int = 120
+    llm_max_retries: int = 2
+    llm_temperature: float = 0.1
+
     # ---- 跨域 ----
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 

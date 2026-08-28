@@ -80,9 +80,13 @@ class IsolationService:
         """
         if project.source_type == "git_repo":
             dest = settings.workspace_path / str(project.id) / "src"
+            logger.info("项目 %s 开始克隆仓库: %s -> %s", project.id, project.source_path, dest)
             await self._clone_repo(project.source_path, dest)
+            logger.info("项目 %s 仓库克隆成功: %s", project.id, dest)
             return dest
-        return validate_host_path(project.source_path)
+        resolved = validate_host_path(project.source_path)
+        logger.info("项目 %s 本地路径已校验: %s", project.id, resolved)
+        return resolved
 
     async def _clone_repo(self, url: str, dest: Path) -> None:
         """浅克隆公开 HTTPS 仓库（参数数组，无 shell 拼接）。"""
@@ -111,6 +115,7 @@ class IsolationService:
             容器 ID（Docker 可用时）或 None（本地回退时）。
         """
         self._source_dirs[project.id] = source_dir
+        logger.info("项目 %s 隔离模式: source_dir=%s", project.id, source_dir)
         # 显式开启本地回退时强制不走 Docker（开发/演示；生产应关闭本开关）
         if settings.isolation_fallback_local:
             logger.warning(
