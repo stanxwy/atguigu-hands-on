@@ -201,6 +201,17 @@ PATH_TOTAL="$(jq -r '.data.total' "$BODY_FILE")"
 info "攻击路径总数：${PATH_TOTAL}"
 jq -r '.data.list[]? | "  - \(.path_code) \(.path_title)（关联漏洞 \(.vuln_count) 个）"' "$BODY_FILE"
 
+# LLM 增强：攻击路径详情（若由 LLM 编排则为语义步骤明细，含复现顺序）
+FIRST_PATH_ID="$(jq -r '.data.list[0].id // empty' "$BODY_FILE" 2>/dev/null || true)"
+if [ -n "$FIRST_PATH_ID" ]; then
+  do_request GET "/api/projects/${PROJECT_ID}/attack-paths/${FIRST_PATH_ID}"
+  if [ "$HTTP_CODE" = "200" ]; then
+    AP_TITLE="$(jq -r '.data.path_title // empty' "$BODY_FILE")"
+    info "攻击路径详情「${AP_TITLE}」："
+    jq -r '.data.items[]? | "    \(.step_order). [\(.vuln_code)] \(.vuln_title)：\(.step_text)"' "$BODY_FILE"
+  fi
+fi
+
 do_request GET "/api/projects/${PROJECT_ID}/report"
 expect_ok "查询报告"
 REPORT_ID="$(jq -r '.data.report_id' "$BODY_FILE")"
@@ -218,6 +229,32 @@ DL_CODE="$(curl -sS --max-time 60 -o "$REPORT_FILE" -w '%{http_code}' \
   "${BASE_URL}/api/projects/${PROJECT_ID}/report/download" 2>/dev/null || true)"
 [ "$DL_CODE" = "200" ] || fail "报告下载失败：HTTP ${DL_CODE}"
 info "报告已下载：${REPORT_FILE}（$(wc -c < "$REPORT_FILE") 字节）"
+
+# =============================================================================
+# 步骤 8.5/9：LLM 增强审计（诊断报告中的语义内容 / 降级标记 / token 计量）
+# =============================================================================
+info "=== 步骤 8.5/9：LLM 增强审计 ==="
+
+# ① 报告语义章节（评估结论 / 修复建议）：缺省说明 LLM 降级（纯规则模式）
+if grep -q "^## 评估结论" "$REPORT_FILE"; then
+  info "报告已包含「评估结论」（LLM 语义摘要生成）"
+else
+  warn "报告未含「评估结论」章节——LLM 已降级（纯规则模式），AC-7 演示闭环不受影响"
+fi
+
+# ② LLM 调用审计日志（确认 / 验证 / 攻击路径 / 摘要）
+do_request GET "/api/projects/${PROJECT_ID}/llm-logs?page_size=100"
+LLM_LOG_TOTAL="$(jq -r '.data.total // 0' "$BODY_FILE" 2>/dev/null || echo 0)"
+info "LLM 调用审计记录：共 ${LLM_LOG_TOTAL} 条"
+if [ "${LLM_LOG_TOTAL}" -gt 0 ] 2>/dev/null; then
+  jq -r '.data.list[]? | "  - [\(.task_type)] \(.model) pt=\(.prompt_tokens) ct=\(.completion_tokens) fallback=\(.fallback)"' "$BODY_FILE"
+fi
+
+# ③ 资源计量（真实 token）
+do_request GET "/api/projects/${PROJECT_ID}/resources?limit=5"
+if [ "$HTTP_CODE" = "200" ]; then
+  jq -r '.data.list[]? | "  - [资源采集] cpu=\(.cpu_usage // "-")% mem=\(.memory_usage // "-")MB token=\(.token_count // 0)"' "$BODY_FILE"
+fi
 
 # =============================================================================
 # 步骤 9/9：汇总

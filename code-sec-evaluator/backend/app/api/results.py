@@ -19,6 +19,7 @@ from app.services import (
     report_service,
     vulnerability_service,
 )
+from app.services.llm_service import llm_service
 from app.services.monitor_service import monitor_service
 
 router = APIRouter(prefix="/api/projects/{project_id}", tags=["Result"])
@@ -180,3 +181,18 @@ async def list_resources(
     """查询资源消耗（最近 N 条）。"""
     items = await monitor_service.list_resources(db, project.id, limit)
     return ok({"list": items})
+
+
+@router.get("/llm-logs")
+async def list_llm_logs(
+    project: Project = Depends(get_owned_project),
+    db: AsyncSession = Depends(get_db),
+    task_type: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+) -> dict[str, Any]:
+    """查询 LLM 调用日志（确认/验证/攻击路径/摘要审计记录）。"""
+    total, items = await llm_service.list_logs(
+        db, project.id, task_type=task_type, page=page, page_size=page_size
+    )
+    return ok({"total": total, "list": items})

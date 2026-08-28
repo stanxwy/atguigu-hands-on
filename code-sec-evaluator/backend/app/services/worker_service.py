@@ -317,6 +317,8 @@ async def _run_scan_role(
             stage_id=stage_id,
         )
         await db.commit()
+        await llm_service.flush_logs(db)
+        await db.commit()
         summary = f"{role} 扫描完成，命中 {len(created)} 个隐患"
         return await _mark_done(db, project, task, role, summary, True)
     except Exception as exc:  # noqa: BLE001  异步任务内必须捕获异常并落库
@@ -349,6 +351,9 @@ async def _confirm_match(
         file_path=vuln.file_path or "",
         evidence=vuln.evidence_text or "",
         context=context,
+        project_id=project.id,
+        stage_id=stage_id,
+        vuln_id=vuln.id,
     )
     if result is None:
         return
@@ -403,6 +408,9 @@ async def _verify_single(
             file_path=vuln.file_path,
             evidence=vuln.evidence_text or "",
             context=context,
+            project_id=project.id,
+            stage_id=stage_id,
+            vuln_id=vuln.id,
         )
         if generated is not None:
             llm_reproduce, llm_verify_code = generated
@@ -494,6 +502,8 @@ async def run_vuln_verify(
                 f"验证漏洞 {vuln.vuln_code}: {vuln.vuln_title}（{vuln.risk_level}）",
                 stage_id=stage_id,
             )
+        await db.commit()
+        await llm_service.flush_logs(db)
         await db.commit()
         logger.info("项目 %s 漏洞验证完成，共 %d 个", project.id, len(vulns))
         await monitor_service.append_log(
@@ -619,6 +629,7 @@ async def _plan_attack_path(
     db: AsyncSession,
     project: Project,
     ordered: list[Vulnerability],
+    stage_id: int,
 ) -> dict[str, Any]:
     """编排攻击路径：优先 LLM 语义编排，降级为按严重度排序的默认方案。
 
@@ -642,7 +653,9 @@ async def _plan_attack_path(
                 "file_path": v.file_path or "",
             }
             for v in ordered
-        ]
+        ],
+        project_id=project.id,
+        stage_id=stage_id,
     )
     if plan is None or not plan.steps:
         logger.info("项目 %s 攻击路径降级：按严重度排序", project.id)
@@ -686,6 +699,7 @@ async def _summarize_report(
     db: AsyncSession,
     project: Project,
     ordered: list[Vulnerability],
+    stage_id: int,
 ) -> ReportEnhancement | None:
     """请求 LLM 生成报告摘要与定制修复建议（降级返回 None）。"""
     if not llm_service.enabled or not ordered:
@@ -697,6 +711,8 @@ async def _summarize_report(
     enhancement = await llm_service.summarize_report(
         project_name=project.project_name,
         vuln_summary=vuln_summary,
+        project_id=project.id,
+        stage_id=stage_id,
     )
     if enhancement is None:
         logger.info("项目 %s 报告增强降级：无 LLM 摘要", project.id)
@@ -730,7 +746,7 @@ async def run_report_gen(db: AsyncSession, project: Project, stage_id: int) -> b
         )
         path = None
         if ordered:
-            plan = await _plan_attack_path(db, project, ordered)
+            plan = await _plan_attack_path(db, project, ordered, stage_id)
             path = await attack_path_service.create_attack_path(
                 db,
                 project.id,
@@ -740,9 +756,11 @@ async def run_report_gen(db: AsyncSession, project: Project, stage_id: int) -> b
                 items=plan["items"],
             )
             await db.commit()
-        enhancement = await _summarize_report(db, project, ordered)
+        enhancement = await _summarize_report(db, project, ordered, stage_id)
         markdown_text = _build_markdown(project, vulns, ordered, path, enhancement)
         report = await report_service.generate_and_save(db, project.id, markdown_text)
+        await db.commit()
+        await llm_service.flush_logs(db)
         await db.commit()
         logger.info(
             "项目 %s 报告已生成: report_id=%s，漏洞 %d 个",
