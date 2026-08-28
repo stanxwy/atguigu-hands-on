@@ -13,10 +13,19 @@ export interface RetentionConfig {
   days: number;
 }
 
+export interface LLMConfig {
+  enabled: boolean;
+  base_url: string;
+  api_key: string;
+  api_key_configured: boolean;
+  model: string;
+}
+
 export interface SystemConfig {
   isolation: IsolationConfig;
   task: TaskConfig;
   retention: RetentionConfig;
+  llm: LLMConfig;
 }
 
 /** 更新配置请求体：扁平键值对（如 task.max_concurrency）。 */
@@ -27,4 +36,5 @@ export interface ConfigUpdateResult {
   isolation?: IsolationConfig;
   task?: TaskConfig;
   retention?: RetentionConfig;
+  llm?: LLMConfig;
 }

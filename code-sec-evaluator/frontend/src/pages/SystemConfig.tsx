@@ -31,6 +31,11 @@ interface ConfigFormState {
   defaultTimeoutSeconds: string;
   maxConcurrency: string;
   retentionDays: string;
+  llmEnabled: boolean;
+  llmBaseUrl: string;
+  llmApiKey: string;
+  clearLlmApiKey: boolean;
+  llmModel: string;
 }
 
 interface ConfigFieldErrors {
@@ -38,6 +43,7 @@ interface ConfigFieldErrors {
   defaultTimeoutSeconds?: string;
   maxConcurrency?: string;
   retentionDays?: string;
+  llmBaseUrl?: string;
 }
 
 const NETWORK_MODES = ['none', 'internal', 'bridge'] as const;
@@ -55,6 +61,10 @@ function validateForm(form: ConfigFormState): ConfigFieldErrors {
   }
   if (!/^\d+$/.test(form.retentionDays) || Number(form.retentionDays) < 1) {
     errors.retentionDays = '请输入正整数（天）';
+  }
+  const baseUrl = form.llmBaseUrl.trim();
+  if (baseUrl !== '' && !/^https?:\/\/.+/.test(baseUrl)) {
+    errors.llmBaseUrl = '请输入 http:// 或 https:// 开头的地址';
   }
   return errors;
 }
@@ -100,6 +110,11 @@ export function SystemConfig() {
     defaultTimeoutSeconds: '',
     maxConcurrency: '',
     retentionDays: '',
+    llmEnabled: false,
+    llmBaseUrl: '',
+    llmApiKey: '',
+    clearLlmApiKey: false,
+    llmModel: '',
   });
   const [fieldErrors, setFieldErrors] = useState<ConfigFieldErrors>({});
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -119,6 +134,11 @@ export function SystemConfig() {
       defaultTimeoutSeconds: `${config.task.default_timeout_seconds}`,
       maxConcurrency: `${config.task.max_concurrency}`,
       retentionDays: `${config.retention.days}`,
+      llmEnabled: config.llm.enabled,
+      llmBaseUrl: config.llm.base_url,
+      llmApiKey: '',
+      clearLlmApiKey: false,
+      llmModel: config.llm.model,
     });
     setFieldErrors({});
   }, [config]);
@@ -149,6 +169,23 @@ export function SystemConfig() {
     const days = Number(form.retentionDays);
     if (days !== config.retention.days) {
       updates['retention.days'] = days;
+    }
+    if (form.llmEnabled !== config.llm.enabled) {
+      updates['llm.enabled'] = form.llmEnabled;
+    }
+    const llmBaseUrl = form.llmBaseUrl.trim();
+    if (llmBaseUrl !== config.llm.base_url) {
+      updates['llm.base_url'] = llmBaseUrl;
+    }
+    const llmModel = form.llmModel.trim();
+    if (llmModel !== config.llm.model) {
+      updates['llm.model'] = llmModel;
+    }
+    const llmApiKey = form.llmApiKey.trim();
+    if (llmApiKey !== '') {
+      updates['llm.api_key'] = llmApiKey;
+    } else if (form.clearLlmApiKey && config.llm.api_key_configured) {
+      updates['llm.api_key'] = '';
     }
     return updates;
   }, [config, form]);
@@ -191,6 +228,11 @@ export function SystemConfig() {
       defaultTimeoutSeconds: `${config.task.default_timeout_seconds}`,
       maxConcurrency: `${config.task.max_concurrency}`,
       retentionDays: `${config.retention.days}`,
+      llmEnabled: config.llm.enabled,
+      llmBaseUrl: config.llm.base_url,
+      llmApiKey: '',
+      clearLlmApiKey: false,
+      llmModel: config.llm.model,
     });
     setFieldErrors({});
     setSaveSuccess(false);
@@ -294,6 +336,64 @@ export function SystemConfig() {
                   inputMode="numeric"
                   fullWidth
                 />
+              </SectionCard>
+            </Grid>
+
+            <Grid item xs={12} md={6}>
+              <SectionCard title="LLM 分析" description="开关与模型参数，仅影响之后启动的项目">
+                <Stack spacing={2.5}>
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        checked={form.llmEnabled}
+                        onChange={(_event, checked) => updateField('llmEnabled', checked)}
+                      />
+                    }
+                    label="启用 LLM 语义分析"
+                  />
+                  <TextField
+                    label="Base URL"
+                    value={form.llmBaseUrl}
+                    onChange={(event) => updateField('llmBaseUrl', event.target.value)}
+                    error={fieldErrors.llmBaseUrl !== undefined}
+                    helperText={fieldErrors.llmBaseUrl ?? '留空使用 .env 中的 LLM_BASE_URL'}
+                    placeholder="https://api.example.com/v1"
+                    fullWidth
+                  />
+                  <TextField
+                    label="Model"
+                    value={form.llmModel}
+                    onChange={(event) => updateField('llmModel', event.target.value)}
+                    helperText="留空使用 .env 中的 LLM_MODEL"
+                    placeholder="gpt-4.1-mini"
+                    fullWidth
+                  />
+                  <TextField
+                    label="API Key"
+                    value={form.llmApiKey}
+                    onChange={(event) => updateField('llmApiKey', event.target.value)}
+                    helperText={
+                      config.llm.api_key_configured
+                        ? '已保存用户提供的 API Key；留空保持不变'
+                        : '留空使用 .env 中的 LLM_API_KEY'
+                    }
+                    type="password"
+                    autoComplete="new-password"
+                    fullWidth
+                  />
+                  {config.llm.api_key_configured && (
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={form.clearLlmApiKey}
+                          onChange={(_event, checked) => updateField('clearLlmApiKey', checked)}
+                          disabled={form.llmApiKey.trim() !== ''}
+                        />
+                      }
+                      label="清除已保存的 API Key"
+                    />
+                  )}
+                </Stack>
               </SectionCard>
             </Grid>
           </Grid>

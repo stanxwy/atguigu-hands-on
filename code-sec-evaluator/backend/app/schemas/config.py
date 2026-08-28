@@ -26,12 +26,23 @@ class RetentionConfig(StrictModel):
     days: int = 30
 
 
+class LLMConfig(StrictModel):
+    """LLM 语义分析配置分组。"""
+
+    enabled: bool = False
+    base_url: str = ""
+    api_key: str = ""
+    api_key_configured: bool = False
+    model: str = ""
+
+
 class ConfigOut(StrictModel):
     """系统配置整体响应。"""
 
     isolation: IsolationConfig = IsolationConfig()
     task: TaskConfig = TaskConfig()
     retention: RetentionConfig = RetentionConfig()
+    llm: LLMConfig = LLMConfig()
 
 
 class ConfigUpdateRequest(StrictModel):

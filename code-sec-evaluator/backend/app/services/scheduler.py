@@ -20,7 +20,7 @@ from app.models.project import Project
 from app.models.stage import RuntimeStage
 from app.services import config_service, worker_service
 from app.services.isolation_service import isolation_service
-from app.services.llm_service import llm_service
+from app.services.llm_service import LLMRuntimeConfig, llm_service
 from app.services.monitor_service import monitor_service
 
 logger = logging.getLogger("app.scheduler")
@@ -70,6 +70,11 @@ class Scheduler:
             if project.project_status not in PROJECT_STARTABLE:
                 raise StatusConflictError("当前状态不允许启动")
             await self._sync_concurrency(db)
+            llm_service.reset_with_config(
+                LLMRuntimeConfig.from_mapping(
+                    await config_service.get_llm_runtime_config(db)
+                )
+            )
             project.project_status = "running"
             llm_service.reset_usage()
             await self._reset_stages(db, project_id)
@@ -148,9 +153,7 @@ class Scheduler:
                     self._running_tasks.pop(project_id, None)
                     self._stop_flags.pop(project_id, None)
 
-    async def _execute_pipeline(
-        self, db: AsyncSession, project_id: int
-    ) -> None:
+    async def _execute_pipeline(self, db: AsyncSession, project_id: int) -> None:
         """推进阶段状态机。"""
         stop_flag = self._stop_flags.get(project_id)
         project = await db.get(Project, project_id)
@@ -158,9 +161,7 @@ class Scheduler:
             return
 
         logger.info("项目 %s 开始执行流水线，解析源码目录", project_id)
-        await monitor_service.append_log(
-            db, project_id, "info", "开始准备隔离环境"
-        )
+        await monitor_service.append_log(db, project_id, "info", "开始准备隔离环境")
         source_dir = await isolation_service.resolve_source_dir(project)
         logger.info("项目 %s 源码目录已解析: %s", project_id, source_dir)
         await monitor_service.append_log(
@@ -168,9 +169,7 @@ class Scheduler:
         )
         await isolation_service.prepare_environment(db, project, source_dir)
         logger.info("项目 %s 隔离环境已准备", project_id)
-        await monitor_service.append_log(
-            db, project_id, "info", "隔离环境已准备"
-        )
+        await monitor_service.append_log(db, project_id, "info", "隔离环境已准备")
         await db.commit()
 
         for stage_name in STAGE_ORDER:
@@ -197,7 +196,9 @@ class Scheduler:
 
             stage_ok = True
             for role in STAGE_ROLES.get(stage_name, []):
-                role_ok = await self._dispatch_role(db, project, stage, role, source_dir)
+                role_ok = await self._dispatch_role(
+                    db, project, stage, role, source_dir
+                )
                 logger.info("项目 %s 角色 %s 执行完成: %s", project_id, role, role_ok)
                 if not role_ok:
                     stage_ok = False
@@ -281,9 +282,7 @@ class Scheduler:
             project.project_status = status
         await db.commit()
         logger.info("项目 %s 进入终态: %s", project_id, status)
-        await monitor_service.append_log(
-            db, project_id, "info", f"项目状态: {status}"
-        )
+        await monitor_service.append_log(db, project_id, "info", f"项目状态: {status}")
         monitor_service.publish(
             project_id, "project_status", {"project_status": status}
         )

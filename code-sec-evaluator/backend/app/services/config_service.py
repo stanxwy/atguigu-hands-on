@@ -46,6 +46,26 @@ CONFIG_DEFS: dict[str, tuple[str, str, str]] = {
         str(settings.retention_days),
         "已完成项目文件保留天数",
     ),
+    "llm.enabled": (
+        "bool",
+        "true" if settings.llm_enabled else "false",
+        "是否启用 LLM 语义分析",
+    ),
+    "llm.base_url": (
+        "string",
+        "",
+        "用户配置的 LLM OpenAI 兼容端点，空值使用 .env",
+    ),
+    "llm.api_key": (
+        "string",
+        "",
+        "用户配置的 LLM API Key，空值使用 .env",
+    ),
+    "llm.model": (
+        "string",
+        "",
+        "用户配置的 LLM 模型名，空值使用 .env",
+    ),
 }
 
 _VALID_KEYS: frozenset[str] = frozenset(CONFIG_DEFS.keys())
@@ -96,6 +116,17 @@ def _nest(typed_map: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _public_nested(typed_map: dict[str, Any]) -> dict[str, Any]:
+    """返回前端可展示配置；敏感字段只暴露是否已配置。"""
+    nested = _nest(typed_map)
+    llm = nested.get("llm")
+    if isinstance(llm, dict):
+        api_key = str(llm.get("api_key") or "")
+        llm["api_key"] = ""
+        llm["api_key_configured"] = bool(api_key.strip())
+    return nested
+
+
 async def seed_configs(db: AsyncSession) -> None:
     """写入缺失的配置键（幂等）。"""
     existing_keys = set(
@@ -123,14 +154,30 @@ async def get_typed_map(db: AsyncSession) -> dict[str, Any]:
     """返回全部配置的类型化键值映射。"""
     rows = await get_rows(db)
     return {
-        key: cast_value(row.config_value, row.config_type)
-        for key, row in rows.items()
+        key: cast_value(rows[key].config_value, rows[key].config_type)
+        if key in rows
+        else cast_value(default, config_type)
+        for key, (config_type, default, _description) in CONFIG_DEFS.items()
     }
 
 
 async def get_nested(db: AsyncSession) -> dict[str, Any]:
     """返回嵌套分组的配置（isolation/task/retention）。"""
-    return _nest(await get_typed_map(db))
+    return _public_nested(await get_typed_map(db))
+
+
+async def get_llm_runtime_config(db: AsyncSession) -> dict[str, Any]:
+    """返回项目启动时使用的 LLM 配置；用户配置为空则回退 .env。"""
+    typed = await get_typed_map(db)
+    return {
+        "enabled": bool(typed.get("llm.enabled", settings.llm_enabled)),
+        "base_url": str(typed.get("llm.base_url") or settings.llm_base_url),
+        "api_key": str(typed.get("llm.api_key") or settings.llm_api_key),
+        "model": str(typed.get("llm.model") or settings.llm_model),
+        "timeout_seconds": settings.llm_timeout_seconds,
+        "max_retries": settings.llm_max_retries,
+        "temperature": settings.llm_temperature,
+    }
 
 
 async def get_value(db: AsyncSession, key: str, default: Any = None) -> Any:
@@ -144,17 +191,13 @@ async def get_value(db: AsyncSession, key: str, default: Any = None) -> Any:
     Returns:
         类型化后的配置值。
     """
-    row = await db.scalar(
-        select(SystemConfig).where(SystemConfig.config_key == key)
-    )
+    row = await db.scalar(select(SystemConfig).where(SystemConfig.config_key == key))
     if row is None:
         return default
     return cast_value(row.config_value, row.config_type)
 
 
-async def update_configs(
-    db: AsyncSession, updates: dict[str, Any]
-) -> dict[str, Any]:
+async def update_configs(db: AsyncSession, updates: dict[str, Any]) -> dict[str, Any]:
     """批量更新配置，返回仅包含被更新分组的嵌套片段。
 
     Args:
@@ -176,7 +219,14 @@ async def update_configs(
             raise ParamError(f"未知配置键: {key}")
         row = rows.get(key)
         if row is None:
-            raise ParamError(f"配置键尚未初始化: {key}")
+            config_type, _default, description = CONFIG_DEFS[key]
+            row = SystemConfig(
+                config_key=key,
+                config_value="",
+                config_type=config_type,
+                description=description,
+            )
+            db.add(row)
         try:
             typed = cast_value(str(raw_value), row.config_type)
         except (ValueError, TypeError) as exc:

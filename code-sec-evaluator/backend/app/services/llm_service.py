@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -43,6 +43,49 @@ class Usage:
     @property
     def total(self) -> int:
         return self.prompt_tokens + self.completion_tokens
+
+
+@dataclass(frozen=True)
+class LLMRuntimeConfig:
+    """项目启动时冻结的 LLM 运行配置。"""
+
+    enabled: bool
+    base_url: str
+    api_key: str
+    model: str
+    timeout_seconds: int = 120
+    max_retries: int = 2
+    temperature: float = 0.1
+
+    @property
+    def ready(self) -> bool:
+        return self.enabled and bool(self.base_url and self.api_key and self.model)
+
+    @classmethod
+    def from_settings(cls) -> LLMRuntimeConfig:
+        return cls(
+            enabled=settings.llm_enabled,
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+            timeout_seconds=settings.llm_timeout_seconds,
+            max_retries=settings.llm_max_retries,
+            temperature=settings.llm_temperature,
+        )
+
+    @classmethod
+    def from_mapping(cls, data: dict[str, Any]) -> LLMRuntimeConfig:
+        return cls(
+            enabled=bool(data.get("enabled")),
+            base_url=str(data.get("base_url") or ""),
+            api_key=str(data.get("api_key") or ""),
+            model=str(data.get("model") or ""),
+            timeout_seconds=int(
+                data.get("timeout_seconds") or settings.llm_timeout_seconds
+            ),
+            max_retries=int(data.get("max_retries") or settings.llm_max_retries),
+            temperature=float(data.get("temperature") or settings.llm_temperature),
+        )
 
 
 class LLMClient:
@@ -149,9 +192,7 @@ class LLMClient:
                 if attempt < self._max_retries:
                     logger.warning("LLM 调用失败(第 %d 次重试): %s", attempt + 1, exc)
                     continue
-        self._record_call(
-            messages, content, 0, 0, ok=False, note=str(last_exc)
-        )
+        self._record_call(messages, content, 0, 0, ok=False, note=str(last_exc))
         raise LLMError(f"LLM 调用失败: {last_exc}")
 
     @staticmethod
@@ -160,7 +201,7 @@ class LLMClient:
         text = content.strip()
         try:
             return json.loads(text)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
             start = text.find("{")
             end = text.rfind("}")
             if start >= 0 and end > start:
@@ -168,7 +209,7 @@ class LLMClient:
                     return json.loads(text[start : end + 1])
                 except json.JSONDecodeError:
                     pass
-            raise LLMError("模型输出非合法 JSON")
+            raise LLMError("模型输出非合法 JSON") from exc
 
 
 @dataclass
@@ -212,34 +253,39 @@ class LLMService:
 
     def __init__(self) -> None:
         self._client: LLMClient | None = None
+        self._client_config: LLMRuntimeConfig | None = None
         self._enabled = False
         self._pending_logs: list[dict[str, Any]] = []
         self.reset()
 
     def reset(self) -> None:
         """按当前配置（重新）初始化客户端。"""
-        self._enabled = settings.llm_enabled and bool(
-            settings.llm_base_url and settings.llm_api_key and settings.llm_model
-        )
+        self.reset_with_config(LLMRuntimeConfig.from_settings())
+
+    def reset_with_config(self, config: LLMRuntimeConfig) -> None:
+        """按项目启动时的配置快照初始化客户端。"""
+        self._enabled = config.ready
         if not self._enabled:
             self._client = None
+            self._client_config = None
             logger.info("LLM 未启用，使用规则模式（降级）")
             return
-        if self._client is None or self._client.model != settings.llm_model:
+        if self._client is None or self._client_config != config:
             old = self._client
             self._client = LLMClient(
-                settings.llm_base_url,
-                settings.llm_api_key,
-                settings.llm_model,
-                timeout_seconds=settings.llm_timeout_seconds,
-                max_retries=settings.llm_max_retries,
-                temperature=settings.llm_temperature,
+                config.base_url,
+                config.api_key,
+                config.model,
+                timeout_seconds=config.timeout_seconds,
+                max_retries=config.max_retries,
+                temperature=config.temperature,
             )
             if old is not None:
                 import asyncio
 
                 asyncio.get_event_loop().create_task(old.aclose())
-        logger.info("LLM 已启用: model=%s", settings.llm_model)
+            self._client_config = config
+        logger.info("LLM 已启用: model=%s", config.model)
 
     @property
     def enabled(self) -> bool:
@@ -298,11 +344,11 @@ class LLMService:
         """将缓冲的 LLM 调用审计记录批量写入 ``llm_analysis_logs``。"""
         if not self._pending_logs:
             return 0
-        from app.models.llm_analysis_log import LLMAnalysisLog  # noqa: F401  延迟导入避循环
-
-        db.add_all(
-            [LLMAnalysisLog(**entry) for entry in self._pending_logs]
+        from app.models.llm_analysis_log import (
+            LLMAnalysisLog,  # noqa: F401  延迟导入避循环
         )
+
+        db.add_all([LLMAnalysisLog(**entry) for entry in self._pending_logs])
         count = len(self._pending_logs)
         self._pending_logs.clear()
         return count
@@ -324,12 +370,8 @@ class LLMService:
         """
         from app.models.llm_analysis_log import LLMAnalysisLog
 
-        stmt = select(LLMAnalysisLog).where(
-            LLMAnalysisLog.project_id == project_id
-        )
-        count_stmt = select(func.count()).where(
-            LLMAnalysisLog.project_id == project_id
-        )
+        stmt = select(LLMAnalysisLog).where(LLMAnalysisLog.project_id == project_id)
+        count_stmt = select(func.count()).where(LLMAnalysisLog.project_id == project_id)
         if task_type:
             stmt = stmt.where(LLMAnalysisLog.task_type == task_type)
             count_stmt = count_stmt.where(LLMAnalysisLog.task_type == task_type)
