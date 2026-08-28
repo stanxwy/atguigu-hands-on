@@ -45,12 +45,14 @@ export interface WsChatMessageData {
 export interface WsRuntimeLogData {
   log_level: LogLevel;
   log_content: string;
+  created_at?: string;
 }
 
 export interface WsResourceUsageData {
   cpu_usage: number | null;
   memory_usage: number | null;
   token_count: number | null;
+  recorded_at?: string;
 }
 
 export interface WsVulnerabilityFoundData {

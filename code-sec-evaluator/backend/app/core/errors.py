@@ -7,6 +7,8 @@
 
 from typing import Any
 
+from app.utils.time import normalize_datetime_response
+
 
 class AppError(Exception):
     """业务异常基类。
@@ -107,7 +109,7 @@ class InternalError(AppError):
 
 def ok(data: Any = None) -> dict[str, Any]:
     """构造统一成功响应体（code=0）。"""
-    return {"code": 0, "message": "success", "data": data}
+    return {"code": 0, "message": "success", "data": normalize_datetime_response(data)}
 
 
 def fail(code: int, message: str, data: Any = None) -> dict[str, Any]:

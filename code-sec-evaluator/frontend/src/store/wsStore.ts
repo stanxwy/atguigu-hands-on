@@ -204,12 +204,18 @@ export const useWsStore = create<WsState>((set, get) => ({
         break;
       case 'runtime_log':
         set((state) => ({
-          runtimeLogs: [...state.runtimeLogs, envelope.data].slice(-MAX_BUFFER_SIZE),
+          runtimeLogs: [
+            ...state.runtimeLogs,
+            { ...envelope.data, created_at: envelope.data.created_at ?? envelope.timestamp },
+          ].slice(-MAX_BUFFER_SIZE),
         }));
         break;
       case 'resource_usage':
         set((state) => ({
-          resourcePoints: [...state.resourcePoints, envelope.data].slice(-MAX_BUFFER_SIZE),
+          resourcePoints: [
+            ...state.resourcePoints,
+            { ...envelope.data, recorded_at: envelope.data.recorded_at ?? envelope.timestamp },
+          ].slice(-MAX_BUFFER_SIZE),
         }));
         break;
       case 'vulnerability_found':

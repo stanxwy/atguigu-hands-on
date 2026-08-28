@@ -139,7 +139,7 @@ export function Monitor() {
         log_level: log.log_level,
         log_content: log.log_content,
         stage_name: null,
-        created_at: new Date().toISOString(),
+        created_at: log.created_at ?? new Date().toISOString(),
       }));
       return [...prev, ...additions].slice(-MAX_LOCAL_LOGS);
     });
@@ -156,7 +156,7 @@ export function Monitor() {
         cpu_usage: point.cpu_usage,
         memory_usage: point.memory_usage,
         token_count: point.token_count,
-        recorded_at: new Date().toISOString(),
+        recorded_at: point.recorded_at ?? new Date().toISOString(),
       }));
       return [...prev, ...additions].slice(-MAX_LOCAL_RESOURCES);
     });

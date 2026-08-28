@@ -16,6 +16,7 @@ from app.models.resource_usage import ResourceUsage
 from app.models.runtime_log import RuntimeLog
 from app.models.stage import RuntimeStage
 from app.utils.logging import mask
+from app.utils.time import serialize_datetime
 from app.ws.publisher import publisher
 
 
@@ -60,7 +61,11 @@ class MonitorService:
         self.publish(
             project_id,
             "runtime_log",
-            {"log_level": level, "log_content": content},
+            {
+                "log_level": level,
+                "log_content": content,
+                "created_at": serialize_datetime(row.created_at),
+            },
         )
         return row
 
@@ -118,6 +123,7 @@ class MonitorService:
                 "cpu_usage": cpu_usage,
                 "memory_usage": memory_usage,
                 "token_count": token_count,
+                "recorded_at": serialize_datetime(row.recorded_at),
             },
         )
         return row
