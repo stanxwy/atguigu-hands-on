@@ -1,8 +1,8 @@
 """系统配置表模型（对应 SPEC §2.2.12 / §2.5）。"""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import DateTime, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base, BigIntPK
@@ -20,7 +20,7 @@ class SystemConfig(Base):
     description: Mapped[str | None] = mapped_column(String(255), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )

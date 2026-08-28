@@ -1,8 +1,8 @@
 """用户表模型（对应 SPEC §2.2.1）。"""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, String, func
+from sqlalchemy import DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base, BigIntPK
@@ -19,5 +19,7 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(16), nullable=False, default="user")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
     )

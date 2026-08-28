@@ -1,6 +1,6 @@
 """攻击路径表模型（对应 SPEC §2.2.6 / §2.2.7）。"""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     DateTime,
@@ -9,7 +9,6 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
-    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -37,7 +36,9 @@ class AttackPath(Base):
     path_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     final_impact_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
     )
 
     items: Mapped[list["AttackPathItem"]] = relationship(

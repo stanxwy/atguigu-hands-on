@@ -1,8 +1,8 @@
 """聊天消息表模型（对应 SPEC §2.2.8）。"""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base, BigIntPK
@@ -21,5 +21,7 @@ class ChatMessage(Base):
     message_type: Mapped[str] = mapped_column(String(16), nullable=False, default="info")
     message_text: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
     )

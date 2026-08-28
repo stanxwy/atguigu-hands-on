@@ -1,8 +1,8 @@
 """资源消耗表模型（对应 SPEC §2.2.10）。"""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, func
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base, BigIntPK
@@ -24,5 +24,7 @@ class ResourceUsage(Base):
     memory_usage: Mapped[float | None] = mapped_column(Float, nullable=True)
     token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     recorded_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
     )

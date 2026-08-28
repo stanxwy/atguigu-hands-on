@@ -52,7 +52,7 @@ engine = create_async_engine(
 
 
 if engine.dialect.name == "sqlite":
-    # SQLite 默认关闭外键约束，需显式开启以支持 ON DELETE CASCADE（SPEC §2.4）
+    # SQLite 默认关闭外需约束，需显式开启以支持 ON DELETE CASCADE（SPEC §2.4）
     @event.listens_for(engine.sync_engine, "connect")
     def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
         cursor = dbapi_connection.cursor()
