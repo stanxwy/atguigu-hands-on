@@ -25,6 +25,7 @@ from app.services import (
     report_service,
     vulnerability_service,
 )
+from app.services.llm_service import ReportEnhancement, llm_service
 from app.services.monitor_service import monitor_service
 
 logger = logging.getLogger("app.worker")
@@ -144,6 +145,32 @@ def _verify_code(vuln: Vulnerability) -> str:
     )
 
 
+def _read_context(source_dir: Path, relative_path: str, line_no: int, window: int = 30) -> str:
+    """读取命中文件的上下文窗口（±window 行），供 LLM 确认/验证参考。
+
+    Args:
+        source_dir: 源码根目录。
+        relative_path: 命中文件相对路径（POSIX 风格）。
+        line_no: 命中行号（1 起点）。
+        window: 上下各读取行数。
+
+    Returns:
+        带行号的上下文文本；文件不可读时返回空串。
+    """
+    if not relative_path or line_no <= 0:
+        return ""
+    target = source_dir.joinpath(relative_path)
+    try:
+        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    start = max(0, line_no - window - 1)
+    end = min(len(lines), line_no + window)
+    return "\n".join(
+        f"{i + 1}: {line}" for i, line in enumerate(lines[start:end], start=start + 1)
+    )
+
+
 async def _create_worker(
     db: AsyncSession,
     project_id: int,
@@ -259,6 +286,10 @@ async def _run_scan_role(
                 evidence_text=evidence,
             )
             created.append(vuln)
+            if role == "code_analyze":
+                await _confirm_match(
+                    db, project, vuln, source_dir, matches[0][1], stage_id
+                )
             await db.commit()
             monitor_service.publish(
                 project.id,
@@ -296,6 +327,109 @@ async def _run_scan_role(
         return await _mark_done(db, project, task, role, str(exc), False)
 
 
+async def _confirm_match(
+    db: AsyncSession,
+    project: Project,
+    vuln: Vulnerability,
+    source_dir: Path,
+    line_no: int,
+    stage_id: int,
+) -> None:
+    """LLM 确认规则命中是否为真实漏洞（code_analyze 去误报）。
+
+    命中文件的行号取自首个证据（matches[0][1]）。LLM 降级时保留原候选，
+    不做任何改动；确认非真实且置信度 ≥0.7 时标记 verify_status=\"failed\"。
+    """
+    if not llm_service.enabled:
+        return
+    context = _read_context(source_dir, vuln.file_path or "", line_no)
+    result = await llm_service.confirm_vuln(
+        vuln_title=vuln.vuln_title,
+        risk_level=vuln.risk_level,
+        file_path=vuln.file_path or "",
+        evidence=vuln.evidence_text or "",
+        context=context,
+    )
+    if result is None:
+        return
+    if not result.is_real and result.confidence >= 0.7:
+        vuln.verify_status = "failed"
+        logger.info(
+            "项目 %s 代码分析 LLM 去误报 %s: %s（置信度 %.2f）",
+            project.id, vuln.vuln_code, vuln.vuln_title, result.confidence,
+        )
+        await monitor_service.append_log(
+            db, project.id, "info",
+            f"LLM 判定 {vuln.vuln_code}「{vuln.vuln_title}」为误报（置信度 {result.confidence:.2f}）",
+            stage_id=stage_id,
+        )
+        monitor_service.publish(
+            project.id,
+            "vulnerability_status",
+            {"vuln_id": vuln.id, "verify_status": vuln.verify_status},
+        )
+    else:
+        logger.info(
+            "项目 %s 代码分析 LLM 确认 %s: %s（is_real=%s, 置信度 %.2f）",
+            project.id, vuln.vuln_code, vuln.vuln_title, result.is_real,
+            result.confidence,
+        )
+
+
+async def _verify_single(
+    db: AsyncSession,
+    project: Project,
+    vuln: Vulnerability,
+    source_dir: Path,
+    stage_id: int,
+) -> None:
+    """对单个漏洞生成复现步骤与验证代码（LLM 真 PoC，降级用模板兜底）。
+
+    已被 L03 判定为误报（verify_status=failed）的候选直接跳过。
+    """
+    if vuln.verify_status == "failed":
+        logger.info(
+            "项目 %s 跳过误报 %s: %s", project.id, vuln.vuln_code, vuln.vuln_title
+        )
+        return
+    vuln.verify_status = "verified"
+    llm_reproduce: str | None = None
+    llm_verify_code: str | None = None
+    if llm_service.enabled and vuln.file_path and vuln.file_path != "-":
+        line_no = _first_evidence_line(vuln.evidence_text or "")
+        context = _read_context(source_dir, vuln.file_path, line_no)
+        generated = await llm_service.verify_vuln(
+            vuln_title=vuln.vuln_title,
+            file_path=vuln.file_path,
+            evidence=vuln.evidence_text or "",
+            context=context,
+        )
+        if generated is not None:
+            llm_reproduce, llm_verify_code = generated
+            logger.info(
+                "项目 %s LLM 生成 PoC %s: %s",
+                project.id, vuln.vuln_code, vuln.vuln_title,
+            )
+    vuln.reproduce_steps_text = llm_reproduce or _reproduce_steps(vuln)
+    vuln.verify_code_text = llm_verify_code or _verify_code(vuln)
+    if llm_reproduce:
+        await monitor_service.append_log(
+            db, project.id, "info",
+            f"LLM 生成验证步骤 {vuln.vuln_code}: {vuln.vuln_title}",
+            stage_id=stage_id,
+        )
+
+
+def _first_evidence_line(evidence: str) -> int:
+    """从证据文本首行解析命中行号（格式 `rel:line: text`）。"""
+    first = evidence.splitlines()[0] if evidence else ""
+    parts = first.split(":")
+    try:
+        return int(parts[1])
+    except (IndexError, ValueError):
+        return 1
+
+
 async def run_generic(db: AsyncSession, project: Project, stage_id: int) -> bool:
     """generic：任务编排/兜底（记录编排启动）。"""
     role = "generic"
@@ -330,8 +464,10 @@ async def run_code_analyze(
     )
 
 
-async def run_vuln_verify(db: AsyncSession, project: Project, stage_id: int) -> bool:
-    """vuln_verify：对候选漏洞逐一验证（生成复现步骤与验证代码）。"""
+async def run_vuln_verify(
+    db: AsyncSession, project: Project, stage_id: int, source_dir: Path
+) -> bool:
+    """vuln_verify：对候选漏洞逐一验证（LLM 生成真实 PoC，降级用模板兜底）。"""
     role = "vuln_verify"
     task = await _create_worker(db, project.id, stage_id, role, "漏洞验证")
     await _mark_running(db, project, task, role, "开始验证候选漏洞")
@@ -348,9 +484,7 @@ async def run_vuln_verify(db: AsyncSession, project: Project, stage_id: int) -> 
             .all()
         )
         for vuln in vulns:
-            vuln.verify_status = "verified"
-            vuln.reproduce_steps_text = _reproduce_steps(vuln)
-            vuln.verify_code_text = _verify_code(vuln)
+            await _verify_single(db, project, vuln, source_dir, stage_id)
             logger.info(
                 "项目 %s 验证漏洞 %s: %s（%s）",
                 project.id, vuln.vuln_code, vuln.vuln_title, vuln.risk_level,
@@ -382,6 +516,7 @@ def _build_markdown(
     vulns: list[Vulnerability],
     attack_vulns: list[Vulnerability],
     path: Any,
+    enhancement: ReportEnhancement | None = None,
 ) -> str:
     """构建权威 Markdown 报告。
 
@@ -390,6 +525,7 @@ def _build_markdown(
         vulns: 按编号排序的漏洞列表（漏洞清单）。
         attack_vulns: 按严重度排序的漏洞列表（攻击路径步骤）。
         path: AttackPath 实例（仅使用其标量字段，避免懒加载关系）。
+        enhancement: LLM 语义增强（摘要 + 定制修复建议）；降级时为空。
     """
     risk_label = {
         "critical": "严重",
@@ -407,11 +543,24 @@ def _build_markdown(
         f"- 漏洞总数：{len(vulns)}",
         f"- 攻击路径数：{1 if path else 0}",
         "",
-        "## 漏洞清单",
-        "",
-        "| 编号 | 标题 | 风险等级 | 位置 | 验证状态 |",
-        "| --- | --- | --- | --- | --- |",
     ]
+    if enhancement and enhancement.summary:
+        lines.extend(
+            [
+                "## 评估结论",
+                "",
+                enhancement.summary,
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## 漏洞清单",
+            "",
+            "| 编号 | 标题 | 风险等级 | 位置 | 验证状态 |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
     for vuln in vulns:
         lines.append(
             f"| {vuln.vuln_code} | {vuln.vuln_title} | "
@@ -452,15 +601,111 @@ def _build_markdown(
     lines.append("")
     lines.append("## 修复建议")
     lines.append("")
-    lines.append(
-        "1. 对用户输入做参数化查询，杜绝字符串拼接 SQL；"
-        "2. 使用白名单校验命令/路径，禁用 shell=True；"
-        "3. 前端输出统一转义，禁止未经净化的 HTML 注入；"
-        "4. 敏感凭据移出源码，改用密钥管理；"
-        "5. 使用强加密算法（如 AES-GCM），替换 MD5/SHA1/ECB。"
-    )
+    if enhancement and enhancement.remediation:
+        lines.append(enhancement.remediation)
+    else:
+        lines.append(
+            "1. 对用户输入做参数化查询，杜绝字符串拼接 SQL；"
+            "2. 使用白名单校验命令/路径，禁用 shell=True；"
+            "3. 前端输出统一转义，禁止未经净化的 HTML 注入；"
+            "4. 敏感凭据移出源码，改用密钥管理；"
+            "5. 使用强加密算法（如 AES-GCM），替换 MD5/SHA1/ECB。"
+        )
     lines.append("")
     return "\n".join(lines)
+
+
+async def _plan_attack_path(
+    db: AsyncSession,
+    project: Project,
+    ordered: list[Vulnerability],
+) -> dict[str, Any]:
+    """编排攻击路径：优先 LLM 语义编排，降级为按严重度排序的默认方案。
+
+    Returns:
+        ``{"title", "summary", "final_impact", "items"}``，其中
+        items 为 ``[(vuln_id, step_text)]``（按利用顺序）。
+    """
+    fallback_items = [
+        (
+            v.id,
+            f"利用「{v.vuln_title}」（{v.file_path or '未知位置'}）",
+        )
+        for v in ordered
+    ]
+    plan = await llm_service.build_attack_path(
+        [
+            {
+                "vuln_code": v.vuln_code,
+                "vuln_title": v.vuln_title,
+                "risk_level": v.risk_level,
+                "file_path": v.file_path or "",
+            }
+            for v in ordered
+        ]
+    )
+    if plan is None or not plan.steps:
+        logger.info("项目 %s 攻击路径降级：按严重度排序", project.id)
+        await monitor_service.append_log(
+            db, project.id, "info", "LLM 未编排攻击路径，降级为按风险排序",
+        )
+        return {
+            "title": "综合攻击路径：从信息泄露到命令执行",
+            "summary": "按风险严重度串联全部已确认漏洞，构成从信息泄露、注入到命令执行的完整攻击链。",
+            "final_impact": "敏感数据大范围泄露 + 服务器被完全控制",
+            "items": fallback_items,
+        }
+    by_code = {v.vuln_code: v for v in ordered}
+    items: list[tuple[int, str]] = []
+    for step in plan.steps:
+        vuln = by_code.get(step.vuln_code)
+        if vuln is not None:
+            items.append((vuln.id, step.step_text or f"利用「{vuln.vuln_title}」"))
+    if not items:
+        logger.info("项目 %s 攻击路径步骤未匹配，降级为按严重度排序", project.id)
+        return {
+            "title": "综合攻击路径：从信息泄露到命令执行",
+            "summary": "按风险严重度串联全部已确认漏洞，构成从信息泄露、注入到命令执行的完整攻击链。",
+            "final_impact": "敏感数据大范围泄露 + 服务器被完全控制",
+            "items": fallback_items,
+        }
+    logger.info("项目 %s LLM 编排攻击路径：%s", project.id, plan.title)
+    await monitor_service.append_log(
+        db, project.id, "info",
+        f"LLM 编排攻击路径「{plan.title}」共 {len(items)} 步",
+    )
+    return {
+        "title": plan.title,
+        "summary": plan.summary,
+        "final_impact": plan.final_impact,
+        "items": items,
+    }
+
+
+async def _summarize_report(
+    db: AsyncSession,
+    project: Project,
+    ordered: list[Vulnerability],
+) -> ReportEnhancement | None:
+    """请求 LLM 生成报告摘要与定制修复建议（降级返回 None）。"""
+    if not llm_service.enabled or not ordered:
+        return None
+    vuln_summary = "\n".join(
+        f"- {v.vuln_code} {v.vuln_title}（{v.risk_level}，{v.file_path or '未知位置'}）"
+        for v in ordered
+    )
+    enhancement = await llm_service.summarize_report(
+        project_name=project.project_name,
+        vuln_summary=vuln_summary,
+    )
+    if enhancement is None:
+        logger.info("项目 %s 报告增强降级：无 LLM 摘要", project.id)
+        return None
+    logger.info("项目 %s LLM 生成报告摘要与修复建议", project.id)
+    await monitor_service.append_log(
+        db, project.id, "info", "LLM 生成报告摘要与定制修复建议",
+    )
+    return enhancement
 
 
 async def run_report_gen(db: AsyncSession, project: Project, stage_id: int) -> bool:
@@ -485,23 +730,18 @@ async def run_report_gen(db: AsyncSession, project: Project, stage_id: int) -> b
         )
         path = None
         if ordered:
-            items = [
-                (
-                    v.id,
-                    f"利用「{v.vuln_title}」（{v.file_path or '未知位置'}）",
-                )
-                for v in ordered
-            ]
+            plan = await _plan_attack_path(db, project, ordered)
             path = await attack_path_service.create_attack_path(
                 db,
                 project.id,
-                path_title="综合攻击路径：从信息泄露到命令执行",
-                path_summary="按风险严重度串联全部已确认漏洞，构成从信息泄露、注入到命令执行的完整攻击链。",
-                final_impact_text="敏感数据大范围泄露 + 服务器被完全控制",
-                items=items,
+                path_title=plan["title"],
+                path_summary=plan["summary"],
+                final_impact_text=plan["final_impact"],
+                items=plan["items"],
             )
             await db.commit()
-        markdown_text = _build_markdown(project, vulns, ordered, path)
+        enhancement = await _summarize_report(db, project, ordered)
+        markdown_text = _build_markdown(project, vulns, ordered, path, enhancement)
         report = await report_service.generate_and_save(db, project.id, markdown_text)
         await db.commit()
         logger.info(
@@ -533,23 +773,18 @@ async def run_ops(db: AsyncSession, project: Project, stage_id: int) -> bool:
     task = await _create_worker(db, project.id, stage_id, role, "运维巡检")
     await _mark_running(db, project, task, role, "开始运维巡检与资源采集")
     try:
-        evidence_len = await db.scalar(
-            select(Vulnerability.evidence_text).where(
-                Vulnerability.project_id == project.id
-            ).limit(1)
-        )
-        # 粗略 token 估算（无真实 LLM 调用，按证据字符量折算）
-        token_count = int(len(evidence_len or "") // 4) if evidence_len else 0
+        # 真实 token 计量：取自本项目评估期间 LLM 实际返回的 usage
+        token_count = llm_service.usage.total
         await monitor_service.collect_and_record(db, project.id, token_count=token_count)
         await db.commit()
-        logger.info("项目 %s 运维巡检完成，token 估算 %d", project.id, token_count)
+        logger.info("项目 %s 运维巡检完成，真实 token %d", project.id, token_count)
         await monitor_service.append_log(
             db, project.id, "info",
-            f"运维巡检完成，资源采集 1 条（token≈{token_count}）",
+            f"运维巡检完成，资源采集 1 条（token={token_count}）",
             stage_id=stage_id,
         )
         await db.commit()
-        summary = f"运维巡检完成，资源采集 1 条（token≈{token_count}）"
+        summary = f"运维巡检完成，资源采集 1 条（token={token_count}）"
         return await _mark_done(db, project, task, role, summary, True)
     except Exception as exc:  # noqa: BLE001
         logger.exception("运维巡检失败")

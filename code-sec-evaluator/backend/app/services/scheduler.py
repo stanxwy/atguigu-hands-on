@@ -20,6 +20,7 @@ from app.models.project import Project
 from app.models.stage import RuntimeStage
 from app.services import config_service, worker_service
 from app.services.isolation_service import isolation_service
+from app.services.llm_service import llm_service
 from app.services.monitor_service import monitor_service
 
 logger = logging.getLogger("app.scheduler")
@@ -70,6 +71,7 @@ class Scheduler:
                 raise StatusConflictError("当前状态不允许启动")
             await self._sync_concurrency(db)
             project.project_status = "running"
+            llm_service.reset_usage()
             await self._reset_stages(db, project_id)
             await db.commit()
             monitor_service.publish(
@@ -263,7 +265,9 @@ class Scheduler:
                 db, project, stage.id, source_dir
             )
         if role == "vuln_verify":
-            return await worker_service.run_vuln_verify(db, project, stage.id)
+            return await worker_service.run_vuln_verify(
+                db, project, stage.id, source_dir
+            )
         if role == "report_gen":
             return await worker_service.run_report_gen(db, project, stage.id)
         if role == "ops":
