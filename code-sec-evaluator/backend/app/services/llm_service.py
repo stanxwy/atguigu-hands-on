@@ -175,6 +175,7 @@ class LLMClient:
                 resp = await self._http.post("/chat/completions", json=payload)
                 resp.raise_for_status()
                 body = resp.json()
+                logger.info("LLM 调用成功: %s", body)
                 usage = body.get("usage") or {}
                 prompt_tokens = int(usage.get("prompt_tokens") or 0)
                 completion_tokens = int(usage.get("completion_tokens") or 0)
